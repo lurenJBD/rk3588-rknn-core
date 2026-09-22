@@ -49,11 +49,11 @@ All benchmarks below were executed on an **Orange Pi 5 Plus (RK3588)** running m
 
 | Benchmark / Demo | Model / Operator Profile | Input Shape & Precision | Measured Performance | Accuracy & Result |
 |---|---|---|---|---|
-| **`rknn_mobilenet_demo`** | Standard Classification (Conv + Depthwise + Softmax) | `[1, 224, 224, 3]` INT8 | **3.3 ms** latency (~**300 FPS**) | **PASS** (Top-1: Class 156 @ 0.884766) |
-| **`rknn_yolov5_demo`** | Multi-Scale Object Detection (FPN, C3/CSP, SiLU, Anchor Head) | `[1, 640, 640, 3]` INT8 | **24.9 ms** latency (**~34.5 FPS**) | **PASS** (bus @ 0.69, person @ 0.88/0.87/0.84) |
-| **`rknn_dynshape_inference`** | Dynamic Shape Resizing (MobileNet V2 Inverted Residuals) | Dynamic 3 shapes: 256x256 / 224x224 / 160x160 INT8 | 256x256 @ 137.5 FPS<br>224x224 @ 191.8 FPS<br>160x160 @ **258.8 FPS** (peak 365 FPS / 2.74 ms) | **PASS** (Smooth dynamic shape switching, Top-1: Class 155) |
-| **`rknn_matmul_api_demo`** | Hardware Matrix Multiplication (MatMul Engine) | Matrix Dimension `128x256x512` | FP16 $\to$ FP32: **0.16 ms** (6,097 ops/s)<br>INT8 $\to$ INT32: **0.13 ms** (7,936 ops/s)<br>FP16 $\to$ FP16: **0.12 ms** (8,196 ops/s) | **PASS** (Bit-exact output matching reference calculations) |
-| **`rknn_benchmark`** | 100-loop continuous stress benchmark | `[1, 224, 224, 3]` INT8 | Average **3.49 ms** (**286.1 FPS**, peak 327 FPS) | **PASS** (0 drops, 0 timeouts, 100% IRQs handled on CPU4..7) |
+| **`rknn_mobilenet_demo`** | Standard Classification (Conv + Depthwise + Softmax) | `[1, 224, 224, 3]` INT8 | **3.10 ms** latency (**~322.8 FPS** peak) | **PASS** (Top-1: Class 156 @ 0.884766) |
+| **`rknn_yolov5_demo`** | Multi-Scale Object Detection (FPN, C3/CSP, SiLU, Anchor Head) | `[1, 640, 640, 3]` INT8 | **25.12 ms** latency (**~40 FPS**) | **PASS** (bus @ 0.69, person @ 0.88/0.87/0.84) |
+| **`rknn_dynshape_inference`** | Dynamic Shape Resizing (MobileNet V2 Inverted Residuals) | Dynamic 3 shapes: 256x256 / 224x224 / 160x160 INT8 | 256x256 @ 129.3 FPS (peak 185.2 FPS / 5.40 ms)<br>224x224 @ 191.4 FPS (peak 227.1 FPS / 4.40 ms)<br>160x160 @ **311.9 FPS** (peak 375.4 FPS / 2.66 ms) | **PASS** (Smooth dynamic shape switching, Top-1: Class 155) |
+| **`rknn_matmul_api_demo`** | Hardware Matrix Multiplication (MatMul Engine) | Matrix Dimension `128x256x512` | FP16 $\to$ FP16: **0.09 ms** (11,236 ops/s, peak 13,333 ops/s)<br>INT8 $\to$ INT32: **0.22 ms** (4,525 ops/s, peak 5,618 ops/s)<br>FP16 $\to$ FP32: **0.16 ms** (6,250 ops/s) | **PASS** (Bit-exact output matching reference calculations) |
+| **`rknn_benchmark`** | 100-loop continuous stress benchmark (`rknn_create_mem_demo`) | `[1, 224, 224, 3]` INT8 | Latency **3.10 ms** (Average **~280 FPS**, peak **322.8 FPS**) | **PASS** (0 drops, 0 timeouts, 100% IRQs handled on CPU4..7) |
 | **`mindnano-infer`** | 7.9B-parameter LLM (Ling-3.0-tiny W4A8, 4.4 GiB package) | 4K context, 3-core concurrent decoding | Weight load: **4.1 GiB in 33.17s** (~135 MB/s IOVA)<br>Throughput: **11.0 – 13.6 tokens/sec** | **PASS** (45,224 IRQs across Cores 0/1/2, 0 timeouts, 3 complete conversations generated) |
 
 ---
@@ -160,6 +160,12 @@ Verify that the kernel remains clean and untainted:
 # Tainted value should remain 4096 (OOT module flag only; no DIE / BUG bits)
 cat /proc/sys/kernel/tainted
 ```
+
+---
+
+## Acknowledgments
+
+Special thanks and acknowledgment to the [rockchip-npu-notes](https://github.com/gregordinary/rockchip-npu-notes) project for its comprehensive hardware documentation and reverse-engineering insights into the Rockchip RK3588 NPU (including NVDLA-derived architectures, MRDMA behaviors, register command paths, and clock subsystems).
 
 ---
 
