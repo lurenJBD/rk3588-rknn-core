@@ -281,9 +281,13 @@ struct rknpu_device {
 	struct sg_table *cache_sgt[RKNPU_CACHE_SG_TABLE_NUM];
 };
 
+struct rknpu_gem_object;
+
 struct rknpu_file_priv {
 	struct drm_file *file_priv;
 	int domain_id;
+	u64 last_task_token;
+	struct rknpu_gem_object *last_task_obj;
 };
 
 struct rknpu_session {

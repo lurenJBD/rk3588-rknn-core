@@ -11,6 +11,7 @@
 #include <linux/module.h>
 #include <linux/sync_file.h>
 #include <linux/io.h>
+#include <drm/drm_file.h>
 
 #include "rknpu_ioctl.h"
 #include "rknpu_drv.h"
@@ -196,9 +197,11 @@ static void rknpu_job_release_holds(struct rknpu_job *job)
 	job->flags |= RKNPU_JOB_HOLDS_RELEASED;
 	spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
 
-	for (i = 0; i < RKNPU_MAX_CORES; i++)
-		rknpu_iommu_domain_detach(job->rknpu_dev, i,
-					  &job->iommu_ref[i]);
+	for (i = 0; i < RKNPU_MAX_CORES; i++) {
+		if (job->iommu_ref[i].domain)
+			rknpu_iommu_domain_detach(job->rknpu_dev, i,
+						  &job->iommu_ref[i]);
+	}
 
 	if (job->domain_held) {
 		rknpu_iommu_domain_put(job->rknpu_dev);
@@ -388,12 +391,17 @@ static inline struct rknpu_job *rknpu_job_alloc(struct rknpu_device *rknpu_dev,
 	job->task_obj = task_obj;
 	rknpu_gem_object_get(&task_obj->base);
 
-	job->args = kmemdup(args, sizeof(*args), GFP_KERNEL);
-	if (!job->args) {
-		rknpu_job_free(job);
-		return NULL;
+	if (!(args->flags & RKNPU_JOB_NONBLOCK)) {
+		job->args = args;
+		job->args_owner = false;
+	} else {
+		job->args = kmemdup(args, sizeof(*args), GFP_KERNEL);
+		if (!job->args) {
+			rknpu_job_free(job);
+			return NULL;
+		}
+		job->args_owner = true;
 	}
-	job->args_owner = true;
 
 	INIT_WORK(&job->cleanup_work, rknpu_job_cleanup_work);
 	INIT_WORK(&job->recovery_work, rknpu_job_recovery_work);
@@ -1655,13 +1663,35 @@ int rknpu_submit_ioctl(struct drm_device *dev, void *data,
 	struct rknpu_device *rknpu_dev = dev->dev_private;
 
 	struct rknpu_submit *args = data;
-	struct rknpu_gem_object *task_obj;
+	struct rknpu_gem_object *task_obj = NULL;
+	struct rknpu_file_priv *fpriv = file_priv ? file_priv->driver_priv : NULL;
 	int ret;
 
-	task_obj = rknpu_gem_object_find_token(dev, file_priv,
-					       args->task_obj_addr);
-	if (!task_obj)
-		return -ENOENT;
+	/*
+	 * Fastpath: If the task token matches the cached token for this file
+	 * handle, acquire a reference directly without linear IDR scan.
+	 */
+	if (fpriv && args->task_obj_addr &&
+	    args->task_obj_addr == fpriv->last_task_token) {
+		struct rknpu_gem_object *cached = fpriv->last_task_obj;
+
+		if (cached && cached->base.dev == dev &&
+		    kref_get_unless_zero(&cached->base.refcount)) {
+			task_obj = cached;
+		}
+	}
+
+	if (!task_obj) {
+		task_obj = rknpu_gem_object_find_token(dev, file_priv,
+						       args->task_obj_addr);
+		if (!task_obj)
+			return -ENOENT;
+
+		if (fpriv) {
+			fpriv->last_task_token = args->task_obj_addr;
+			fpriv->last_task_obj = task_obj;
+		}
+	}
 
 	/*
 	 * Align submit domain with task_obj domain:

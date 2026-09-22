@@ -652,7 +652,7 @@ void rknpu_iommu_domain_detach(struct rknpu_device *rknpu_dev,
 			       unsigned int core_index,
 			       struct rknpu_iommu_domain_ref *ref)
 {
-	if (!rknpu_dev || !ref || core_index >= RKNPU_MAX_CORES)
+	if (!rknpu_dev || !ref || !ref->domain || core_index >= RKNPU_MAX_CORES)
 		return;
 
 	mutex_lock(&rknpu_dev->iommu_domain_lock);
