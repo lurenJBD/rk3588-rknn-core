@@ -58,6 +58,32 @@ All benchmarks below were executed on an **Orange Pi 5 Plus (RK3588)** running m
 
 ---
 
+## Memory Bandwidth & Mainline DMC Architecture Facts
+
+### 1. Mainline Linux DMC Status
+- **Upstream Driver Status**: As tracked by the Collabora [Rockchip 3588 Upstream Enablement Notes](https://gitlab.collabora.com/hardware-enablement/rockchip-3588/notes-for-rockchip-3588/-/blob/main/mainline-status.md), mainline Linux currently does **not** yet merge or support the RK3588 Dynamic Memory Controller driver (`rockchip,rk3588-dmc` devfreq).
+- **Behavioral Impact**: Without the in-kernel DMC devfreq governor, dynamic frequency scaling of the DDR bus and vendor-specific dynamic memory bus QoS priority steering (which dynamically biases DDR bandwidth towards the NPU/GPU under load in BSP 6.1) are absent in mainline Linux.
+
+### 2. Physical Memory Hardware Baseline
+- **Firmware-Locked Peak Frequency**: On the Orange Pi 5 Plus reference board, the LPDDR4X memory controller is initialized by bootloader/TF-A firmware and locked at its maximum physical frequency of **2112 MHz** (quad-channel 16-bit, theoretical peak bandwidth ~**33.8 GB/s**).
+- **Hardware PMU Verification**: Confirmed via on-chip Rockchip DDR PMU cycle counters:
+  ```bash
+  perf stat -a -e rockchip_ddr/cycles/ sleep 1
+  # Measured: ~2,112,000,000 cycles / 1.00s = 2112 MHz
+  ```
+- **Measured Host Memory Throughput**:
+  - `tinymembench`: Standard `memset` / NEON fill reaches **31.4 GB/s** (~93% of theoretical peak); single-core NEON copy achieves **12.5 GB/s**.
+  - `sysbench` memory: 4-thread parallel write across Cortex-A76 cores reaches **45.2 GB/s** (cache-assisted) and single-core sustained write at **11.7 GB/s**.
+
+### 3. Engineering Implications for NPU & LLM Decode
+- **DRAM Bandwidth Bounds**: Large Language Model decoding (autoregressive token generation) is strictly memory-bandwidth-bound, as weights must be streamed from DRAM once per token.
+- **Fastpath Driver Mitigations**: Because mainline lacks dynamic DMC QoS bias, driver-level software overhead directly impacts effective inference latency. This driver incorporates dedicated submit fastpaths:
+  1. **Zero-Allocation Stack Reuse**: Bypasses `kmemdup`/`kfree` for blocking submissions to eliminate kernel allocator contention.
+  2. **Task Token Hot-Cache**: Directly resolves repeated task objects without O(N) IDR scans.
+  3. **IOMMU Detach Early-Exit**: Eliminates global mutex lock contention across inactive subcores during inference cycles.
+
+---
+
 ## Dependencies (Debian / Ubuntu)
 
 Before compiling the kernel module, ensure that your system has the standard build toolchain and kernel headers matching your running kernel:
