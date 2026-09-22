@@ -888,6 +888,18 @@ static void rknpu_job_schedule(struct rknpu_job *job)
 		job->use_core_num = 1;
 		atomic_set(&job->run_count, job->use_core_num);
 		atomic_set(&job->interrupt_count, job->use_core_num);
+
+		/*
+		 * submit_checked populated subcore_task[0] for validation.
+		 * If the scheduler picked a different core, copy the task
+		 * range to the resolved core's slot so that
+		 * rknpu_job_subcore_commit_pc() reads the right values.
+		 */
+		if (core_index != 0 &&
+		    rknpu_dev->config->num_irqs > 1) {
+			job->args->subcore_task[core_index] =
+				job->args->subcore_task[0];
+		}
 	}
 
 	job->ret = rknpu_iommu_domain_get_and_switch(rknpu_dev,
@@ -1320,10 +1332,18 @@ static bool rknpu_submit_task_base_is_valid(struct rknpu_submit *args,
 {
 	unsigned int core_index;
 
-	if (hweight32(args->core_mask) != 1)
-		return false;
+	/*
+	 * AUTO uses core0 for validation (submit_checked set task_base_addr
+	 * from core0's mapping). The scheduler resolves the actual core later.
+	 */
+	if (args->core_mask == RKNPU_CORE_AUTO_MASK) {
+		core_index = 0;
+	} else {
+		if (hweight32(args->core_mask) != 1)
+			return false;
+		core_index = ffs(args->core_mask) - 1;
+	}
 
-	core_index = ffs(args->core_mask) - 1;
 	return task_obj->core_maps[core_index].mapped &&
 	       args->task_base_addr ==
 			task_obj->core_maps[core_index].dma_addr;
@@ -1502,10 +1522,11 @@ err_job:
  * dispatches back to this helper.
  */
 static int rknpu_submit_checked(struct rknpu_device *rknpu_dev,
-			   struct rknpu_submit *args,
-			   struct rknpu_gem_object *task_obj)
+		   struct rknpu_submit *args,
+		   struct rknpu_gem_object *task_obj)
 {
 	unsigned int core_mask = args->core_mask;
+	bool is_auto = (core_mask == RKNPU_CORE_AUTO_MASK);
 	unsigned int core_index;
 	dma_addr_t dma_addr = 0;
 
@@ -1513,20 +1534,24 @@ static int rknpu_submit_checked(struct rknpu_device *rknpu_dev,
 		return -EINVAL;
 
 	/*
-	 * AUTO is resolved by the scheduler only in the full job path. Resolve
-	 * it deterministically to core0 here, matching the canonical GEM
-	 * mapping returned to userspace.
+	 * AUTO validation: use core0 (the canonical core) for buffer mapping
+	 * checks below, but preserve RKNPU_CORE_AUTO_MASK in args->core_mask
+	 * so rknpu_job_schedule() can pick the least-loaded core at dispatch
+	 * time. In IOMMU mode, GEM buffers are mapped to all registered cores
+	 * (rknpu_gem_map_core_mask()), so the scheduler can safely route to
+	 * any core.
 	 */
-	if (core_mask == RKNPU_CORE_AUTO_MASK)
-		core_mask = RKNPU_CORE0_MASK;
-
-	if (hweight32(core_mask) != 1 ||
-	    core_mask & ~rknpu_dev->config->core_mask) {
-		LOG_ERROR("one target core per submit is supported, mask=%#x\n",
-			  args->core_mask);
-		return -EOPNOTSUPP;
+	if (is_auto) {
+		core_index = 0;
+	} else {
+		if (hweight32(core_mask) != 1 ||
+		    core_mask & ~rknpu_dev->config->core_mask) {
+			LOG_ERROR("one target core per submit is supported, mask=%#x\n",
+				  args->core_mask);
+			return -EOPNOTSUPP;
+		}
+		core_index = ffs(core_mask) - 1;
 	}
-	core_index = ffs(core_mask) - 1;
 
 	if (!args->task_number || (args->flags & ~RKNPU_JOB_MASK) ||
 	    !(args->flags & RKNPU_JOB_PC)) {
@@ -1547,7 +1572,7 @@ static int rknpu_submit_checked(struct rknpu_device *rknpu_dev,
 		return -EINVAL;
 	}
 
-	/* Select target core based on whether the buffer is mapped on that core. */
+	/* Validate buffer mapping against the validation core. */
 	if (!task_obj->core_maps[core_index].mapped ||
 	    !task_obj->core_maps[core_index].sgt) {
 		LOG_ERROR("task buffer is not mapped on core %u, buffer mask=%#x\n",
@@ -1564,12 +1589,20 @@ static int rknpu_submit_checked(struct rknpu_device *rknpu_dev,
 
 	/* Nonblock and fence synchronization are handled by rknpu_submit_full(). */
 
-	args->core_mask = core_mask;
+	/*
+	 * For AUTO, preserve the mask so the scheduler picks the core.
+	 * For explicit single-core, pass through as-is.
+	 */
+	if (!is_auto)
+		args->core_mask = core_mask;
 	args->task_base_addr = dma_addr;
 
 	/*
 	 * On multi-core hardware, use subcore_task[core_index] as authoritative.
 	 * Only fall back to top-level fields when the per-core slot is empty.
+	 * For AUTO, populate core0's slot for validation; the scheduler will
+	 * re-resolve the actual core and rknpu_job_subcore_commit_pc() uses
+	 * the resolved core's slot.
 	 */
 	if (rknpu_dev->config->num_irqs > 1) {
 		struct rknpu_subcore_task *subcore =
