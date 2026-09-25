@@ -133,6 +133,42 @@ static int rknpu_core_mask(int core_index)
 	return core_mask;
 }
 
+/*
+ * On multi-core RKNPU (RK3588/RK3576, num_irqs > 1) librknnrt 2.x fills
+ * subcore_task[] per core and sets the top-level task_number to the SUM of
+ * all subcore slots (e.g. 3 x 1792 = 5376), even for a single-core submit
+ * where every slot points at the same 1792 tasks. Only subcore_task[] is
+ * programmed into the hardware (rknpu_job_subcore_commit_pc()), so validate
+ * the populated subcore slots; fall back to the top-level range only when no
+ * slot is populated. Checking the top-level sum against the task buffer
+ * rejected every large matmul ("invalid rknpu task range! start=0
+ * number=5376 size=73728").
+ */
+static bool rknpu_submit_task_ranges_valid(struct rknpu_device *rknpu_dev,
+					   const struct rknpu_submit *args,
+					   unsigned long size)
+{
+	bool any = false;
+	int i;
+
+	if (rknpu_dev->config->num_irqs > 1) {
+		for (i = 0; i < ARRAY_SIZE(args->subcore_task); i++) {
+			if (!args->subcore_task[i].task_number)
+				continue;
+			any = true;
+			if (!rknpu_task_range_is_valid(size,
+						       args->subcore_task[i].task_start,
+						       args->subcore_task[i].task_number))
+				return false;
+		}
+		if (any)
+			return true;
+	}
+
+	return rknpu_task_range_is_valid(size, args->task_start,
+					 args->task_number);
+}
+
 static u32 rknpu_get_task_number(struct rknpu_job *job, int core_index)
 {
 	struct rknpu_device *rknpu_dev = job->rknpu_dev;
@@ -1393,8 +1429,7 @@ static int __maybe_unused rknpu_submit_full(struct rknpu_device *rknpu_dev,
 	    rknpu_dev->config->max_submit_number > U32_MAX)
 		return -EINVAL;
 
-	if (!rknpu_task_range_is_valid(task_obj->size, args->task_start,
-				       args->task_number)) {
+	if (!rknpu_submit_task_ranges_valid(rknpu_dev, args, task_obj->size)) {
 		LOG_ERROR("invalid rknpu task range!\n");
 		return -EINVAL;
 	}
@@ -1572,8 +1607,7 @@ static int rknpu_submit_checked(struct rknpu_device *rknpu_dev,
 		return -EINVAL;
 	}
 
-	if (!rknpu_task_range_is_valid(task_obj->size, args->task_start,
-				       args->task_number)) {
+	if (!rknpu_submit_task_ranges_valid(rknpu_dev, args, task_obj->size)) {
 		LOG_ERROR("invalid rknpu task range! start=%u number=%u size=%lu\n",
 			  args->task_start, args->task_number, task_obj->size);
 		return -EINVAL;
@@ -1622,6 +1656,14 @@ static int rknpu_submit_checked(struct rknpu_device *rknpu_dev,
 			&args->subcore_task[core_index];
 
 		if (!subcore->task_number) {
+			if (!rknpu_task_range_is_valid(task_obj->size,
+						       args->task_start,
+						       args->task_number)) {
+				LOG_ERROR("invalid rknpu task range! start=%u number=%u size=%lu\n",
+					  args->task_start, args->task_number,
+					  task_obj->size);
+				return -EINVAL;
+			}
 			LOG_WARN("subcore_task[%u] empty, using top-level task range %u..%u\n",
 				 core_index, args->task_start,
 				 args->task_number);
@@ -1673,30 +1715,20 @@ int rknpu_submit_ioctl(struct drm_device *dev, void *data,
 	int ret;
 
 	/*
-	 * Fastpath: If the task token matches the cached token for this file
-	 * handle, acquire a reference directly without linear IDR scan.
+	 * No per-file "last task token" fastpath: it cached a raw
+	 * rknpu_gem_object pointer without holding a reference. Once librknnrt
+	 * destroys a matmul context the GEM handle (token) is recycled by the
+	 * next context, the token compares equal and the stale, already freed
+	 * object was dereferenced (use-after-free; observed as
+	 * "task buffer lacks kernel-mapped backing pages" / SUBMIT -EINVAL on
+	 * the second rknn_matmul context in a process). drm_gem_object_lookup()
+	 * via idr is cheap, so always resolve the token.
 	 */
-	if (fpriv && args->task_obj_addr &&
-	    args->task_obj_addr == fpriv->last_task_token) {
-		struct rknpu_gem_object *cached = fpriv->last_task_obj;
-
-		if (cached && cached->base.dev == dev &&
-		    kref_get_unless_zero(&cached->base.refcount)) {
-			task_obj = cached;
-		}
-	}
-
-	if (!task_obj) {
-		task_obj = rknpu_gem_object_find_token(dev, file_priv,
-						       args->task_obj_addr);
-		if (!task_obj)
-			return -ENOENT;
-
-		if (fpriv) {
-			fpriv->last_task_token = args->task_obj_addr;
-			fpriv->last_task_obj = task_obj;
-		}
-	}
+	(void)fpriv;
+	task_obj = rknpu_gem_object_find_token(dev, file_priv,
+					       args->task_obj_addr);
+	if (!task_obj)
+		return -ENOENT;
 
 	/*
 	 * Align submit domain with task_obj domain:

@@ -385,6 +385,34 @@ int rknpu_core_init(struct rknpu_device *rknpu_dev,
 			 "core %u has no attached PM domain; hardware may be powered down\n",
 			 index);
 
+	/*
+	 * Publish drvdata before touching runtime PM: pm_runtime_use_autosuspend()
+	 * / pm_runtime_set_autosuspend_delay() can synchronously run
+	 * rknpu_runtime_suspend() if runtime PM is already enabled, and that
+	 * callback returns -ENODEV while drvdata is still NULL, latching
+	 * dev->power.runtime_error. rknpu_probe() sets it again later (harmless).
+	 */
+	dev_set_drvdata(dev, rknpu_dev);
+
+	/*
+	 * Start from a known runtime-PM state. A previously bound driver can
+	 * leave it dirty: in-tree rocket's rocket_remove() fails to find the last
+	 * core after cores 0/1 were unbound (find_core_for_dev() scans only
+	 * cores[0..num_cores-1]), so rocket_core_fini() is skipped and runtime
+	 * PM stays enabled on fdad0000.npu ("Unbalanced pm_runtime_enable!").
+	 * A latched runtime_error survives unbind/rebind and makes every
+	 * pm_runtime_resume_and_get() - hence every RKNPU ioctl - fail -EINVAL.
+	 */
+	if (pm_runtime_enabled(dev)) {
+		dev_warn(dev, "core %u: runtime PM left enabled by a previous driver, resetting\n",
+			 index);
+		pm_runtime_disable(dev);
+	}
+	if (dev->power.runtime_error)
+		dev_warn(dev, "core %u: clearing stale runtime PM error %d\n",
+			 index, dev->power.runtime_error);
+	pm_runtime_set_suspended(dev);
+
 	pm_runtime_use_autosuspend(dev);
 	pm_runtime_set_autosuspend_delay(dev, 50);
 	pm_runtime_enable(dev);
