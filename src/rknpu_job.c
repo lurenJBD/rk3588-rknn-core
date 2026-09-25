@@ -817,6 +817,8 @@ static void rknpu_job_done(struct rknpu_job *job, int ret, int core_index)
 	u64 submit_count = atomic_inc_return(&job->submit_count[core_index]);
 	bool finalized = false;
 
+	subcore_data = &rknpu_dev->subcore_datas[core_index];
+
 	/*
 	 * Re-arm while the submit's range still has sections left. The stride
 	 * is one section, so a single large batch runs to the end.
@@ -824,13 +826,16 @@ static void rknpu_job_done(struct rknpu_job *job, int ret, int core_index)
 	if (!ret &&
 	    submit_count <
 		    DIV_ROUND_UP_ULL(task_number, rknpu_pc_arm_step(rknpu_dev))) {
-		job->hw_recoder_time[core_index] = ktime_get();
+		now = ktime_get();
+		spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
+		subcore_data->timer.busy_time +=
+			ktime_sub(now, job->hw_recoder_time[core_index]);
+		job->hw_recoder_time[core_index] = now;
+		spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
 		ret = rknpu_job_subcore_commit(job, core_index);
 		if (!ret)
 			return;
 	}
-
-	subcore_data = &rknpu_dev->subcore_datas[core_index];
 
 	spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
 	if (WARN_ON_ONCE(job->core_done[core_index] ||
