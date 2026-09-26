@@ -171,6 +171,28 @@ struct rknpu_iova_pool {
 	u64 end;   /* pool window end (aperture_end) */
 };
 
+/* Optional, per-device memory-path diagnostics; never used for decisions. */
+enum rknpu_mem_stat {
+	RKNPU_MEM_STAT_HANDLE_HIT,
+	RKNPU_MEM_STAT_DMA_FALLBACK,
+	RKNPU_MEM_STAT_DMA_PROBES,
+	RKNPU_MEM_STAT_OWNER_ENTRIES,
+	RKNPU_MEM_STAT_LOOKUP_NS,
+	RKNPU_MEM_STAT_SYNC_CALLS,
+	RKNPU_MEM_STAT_SYNC_ERRORS,
+	RKNPU_MEM_STAT_SYNC_REQUEST_BYTES,
+	RKNPU_MEM_STAT_SYNC_PAGES_CALLS,
+	RKNPU_MEM_STAT_SYNC_PARTIAL_CALLS,
+	RKNPU_MEM_STAT_SYNC_PAGES_REQUEST_BYTES,
+	RKNPU_MEM_STAT_SYNC_WHOLE_BYTES,
+	RKNPU_MEM_STAT_SYNC_IMPORT_CALLS,
+	RKNPU_MEM_STAT_SYNC_OTHER_CALLS,
+	RKNPU_MEM_STAT_SYNC_NS,
+	RKNPU_MEM_STAT_SYNC_RANGE_CALLS,
+	RKNPU_MEM_STAT_SYNC_EFFECTIVE_BYTES,
+	RKNPU_MEM_STAT_COUNT,
+};
+
 struct rknpu_device {
 	void __iomem *base[RKNPU_MAX_CORES];
 	void __iomem *multicore_base[RKNPU_MAX_CORES][2];
@@ -179,12 +201,13 @@ struct rknpu_device {
 	struct device *dev;
 	struct drm_device *drm_dev;
 	/*
-	 * librknnrt uses MEM_CREATE's obj_addr (canonical dma_addr here) as
-	 * the token in MEM_SYNC and SUBMIT. This is a lookup aid only; all
-	 * operations still validate that the object is reachable from the
-	 * caller's drm_file handle table.
+	 * MEM_CREATE returns obj_addr=handle for normal SUBMIT/MEM_SYNC lookup.
+	 * This xarray supports legacy DMA-address tokens only. Entries hold no
+	 * GEM reference: lookups take a nonzero reference under xa_lock and
+	 * must also verify ownership through the caller's DRM handle table.
 	 */
 	struct xarray gem_dma_xa;
+	atomic64_t mem_stats[RKNPU_MEM_STAT_COUNT];
 	atomic_t sequence;
 	spinlock_t lock;
 	spinlock_t irq_lock;
@@ -286,8 +309,6 @@ struct rknpu_gem_object;
 struct rknpu_file_priv {
 	struct drm_file *file_priv;
 	int domain_id;
-	u64 last_task_token;
-	struct rknpu_gem_object *last_task_obj;
 };
 
 struct rknpu_session {

@@ -19,6 +19,8 @@
 #include <asm/cacheflush.h>
 #include <linux/vmalloc.h>
 #include <linux/xarray.h>
+#include <linux/moduleparam.h>
+#include <linux/seq_file.h>
 
 #include <linux/dma-map-ops.h>
 
@@ -29,6 +31,37 @@
 #include "rknpu_iommu.h"
 
 #define RKNPU_GEM_ALLOC_FROM_PAGES 1
+
+static bool mem_profile;
+module_param(mem_profile, bool, 0444);
+MODULE_PARM_DESC(mem_profile,
+		 "collect memory-path counters/timings (default off; read debugfs mem_stats)");
+
+static inline void rknpu_mem_stat_add(struct rknpu_device *dev,
+				    enum rknpu_mem_stat stat, u64 value)
+{
+	if (unlikely(mem_profile))
+		atomic64_add(value, &dev->mem_stats[stat]);
+}
+
+int rknpu_gem_mem_stats_show(struct seq_file *m, struct rknpu_device *dev)
+{
+	static const char * const names[RKNPU_MEM_STAT_COUNT] = {
+		"handle_hit", "dma_fallback", "dma_probes", "owner_entries",
+		"lookup_ns", "sync_calls", "sync_errors", "sync_request_bytes",
+		"sync_pages_calls", "sync_partial_calls", "sync_pages_request_bytes",
+		"sync_whole_bytes",
+		"sync_import_calls", "sync_other_calls", "sync_ns",
+		"sync_range_calls", "sync_effective_bytes",
+	};
+	int i;
+
+	seq_printf(m, "enabled %u\n", mem_profile);
+	for (i = 0; i < RKNPU_MEM_STAT_COUNT; i++)
+		seq_printf(m, "%s %lld\n", names[i],
+			   (long long)atomic64_read(&dev->mem_stats[i]));
+	return 0;
+}
 
 #if RKNPU_GEM_ALLOC_FROM_PAGES
 static struct device *
@@ -672,50 +705,45 @@ static int rknpu_gem_dma_token_insert(struct rknpu_device *rknpu_dev,
 {
 	struct drm_device *drm = rknpu_obj->base.dev;
 	struct xarray *xa = &rknpu_dev->gem_dma_xa;
-	unsigned long keys[RKNPU_GEM_MAX_CORE_MAPS];
+	unsigned long keys[RKNPU_GEM_MAX_CORE_MAPS + 1];
 	int count = 0;
-	int core;
-	int ret;
+	int core, i, ret;
 
-	/*
-	 * Register both the canonical address and every per-core address.
-	 * Incorporate the object's iommu_domain_id into the upper 32 bits
-	 * so different domains issuing the same IOVA (e.g. 0x1000) do not
-	 * collide in the xarray.
-	 */
+	/* Canonical token plus unique per-core aliases, including all cores. */
 	keys[count++] = rknpu_gem_dma_token_key(rknpu_obj->iommu_domain_id,
 						rknpu_obj->dma_addr);
 	for (core = 0; core < RKNPU_GEM_MAX_CORE_MAPS; core++) {
 		dma_addr_t addr = rknpu_obj->core_maps[core].dma_addr;
+		unsigned long key;
 
 		if (!addr || !rknpu_obj->core_maps[core].mapped)
 			continue;
-		if (addr == rknpu_obj->dma_addr)
-			continue;
-		if (count >= ARRAY_SIZE(keys))
-			break;
-		keys[count++] = rknpu_gem_dma_token_key(rknpu_obj->iommu_domain_id,
-							addr);
+		key = rknpu_gem_dma_token_key(rknpu_obj->iommu_domain_id, addr);
+		for (i = 0; i < count; i++)
+			if (keys[i] == key)
+				break;
+		if (i == count)
+			keys[count++] = key;
 	}
 
 	for (core = 0; core < count; core++) {
-		void *old;
-
-		old = xa_store(xa, keys[core], rknpu_obj, GFP_KERNEL);
-		ret = xa_err(old);
-		if (ret) {
-			while (core-- > 0)
-				xa_erase(xa, keys[core]);
-			return ret;
-		}
-		if (old && old != rknpu_obj) {
+		/* Never replace another object's live token on a collision. */
+		ret = xa_insert(xa, keys[core], rknpu_obj, GFP_KERNEL);
+		if (!ret)
+			continue;
+		if (ret == -EBUSY) {
 			LOG_DEV_ERROR(drm->dev,
 				      "duplicate GEM dma token %#lx (domain %d)\n",
 				      keys[core], rknpu_obj->iommu_domain_id);
-			while (core-- >= 0)
-				xa_erase(xa, keys[core]);
-			return -EEXIST;
+			ret = -EEXIST;
 		}
+		/* Roll back only entries this invocation actually inserted. */
+		xa_lock(xa);
+		while (core-- > 0)
+			if (xa_load(xa, keys[core]) == rknpu_obj)
+				__xa_erase(xa, keys[core]);
+		xa_unlock(xa);
+		return ret;
 	}
 
 	return 0;
@@ -750,54 +778,71 @@ static void rknpu_gem_dma_token_remove(struct rknpu_device *rknpu_dev,
 	xa_unlock(xa);
 }
 
+/*
+ * Token removal in the final GEM release uses the same xa_lock. Acquire a
+ * nonzero reference before releasing that lock: xa_load's internal RCU only
+ * protects the index nodes, not the lifetime of the stored GEM object.
+ */
+static struct rknpu_gem_object *
+rknpu_gem_dma_token_get(struct drm_device *drm, struct drm_file *file_priv,
+			unsigned long key)
+{
+	struct rknpu_device *rknpu_dev = drm->dev_private;
+	struct xarray *xa = &rknpu_dev->gem_dma_xa;
+	struct rknpu_gem_object *obj;
+
+	rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_DMA_PROBES, 1);
+	xa_lock(xa);
+	obj = xa_load(xa, key);
+	if (obj && !kref_get_unless_zero(&obj->base.refcount))
+		obj = NULL;
+	xa_unlock(xa);
+
+	if (!obj)
+		return NULL;
+	/* Never nest the file table lock or final put under xa_lock. */
+	if (obj->base.dev == drm &&
+	    rknpu_gem_object_is_file_handle(file_priv, obj))
+		return obj;
+	rknpu_gem_object_put(&obj->base);
+	return NULL;
+}
+
 struct rknpu_gem_object *
 rknpu_gem_object_find_by_dma(struct drm_device *drm, struct drm_file *file_priv,
 			     dma_addr_t dma_addr)
 {
-	struct rknpu_device *rknpu_dev = drm->dev_private;
-	struct rknpu_gem_object *rknpu_obj;
+	struct rknpu_gem_object *obj;
+	struct rknpu_file_priv *fpriv;
+	int preferred = 0;
 	int d;
 
-	if (!dma_addr)
+	if (!dma_addr || !file_priv)
 		return NULL;
 
-	/*
-	 * Direct lookup: covers tokens that already carry the domain_id in
-	 * the upper 32 bits, as well as domain 0 objects whose key is just
-	 * the bare 32-bit IOVA.
-	 */
-	rknpu_obj = xa_load(&rknpu_dev->gem_dma_xa, (unsigned long)dma_addr);
-	if (rknpu_obj && rknpu_obj->base.dev == drm) {
-		rknpu_gem_object_get(&rknpu_obj->base);
-		return rknpu_obj;
+	/* Preserve direct-key precedence, but only for caller-owned objects. */
+	obj = rknpu_gem_dma_token_get(drm, file_priv, (unsigned long)dma_addr);
+	if (obj || (dma_addr >> 32))
+		return obj;
+
+	fpriv = file_priv->driver_priv;
+	if (fpriv && fpriv->domain_id > 0 &&
+	    fpriv->domain_id < RKNPU_MAX_IOMMU_DOMAIN_NUM) {
+		preferred = fpriv->domain_id;
+		obj = rknpu_gem_dma_token_get(drm, file_priv,
+			rknpu_gem_dma_token_key(preferred, dma_addr));
+		if (obj)
+			return obj;
 	}
 
-	/* If bare 32-bit address, first check client's isolated domain, then search other domains */
-	if ((dma_addr >> 32) == 0) {
-		if (file_priv && file_priv->driver_priv) {
-			struct rknpu_file_priv *fpriv = file_priv->driver_priv;
-
-			if (fpriv->domain_id > 0) {
-				unsigned long key = rknpu_gem_dma_token_key(fpriv->domain_id, dma_addr);
-
-				rknpu_obj = xa_load(&rknpu_dev->gem_dma_xa, key);
-				if (rknpu_obj && rknpu_obj->base.dev == drm &&
-				    rknpu_gem_object_is_file_handle(file_priv, rknpu_obj)) {
-					rknpu_gem_object_get(&rknpu_obj->base);
-					return rknpu_obj;
-				}
-			}
-		}
-
-		for (d = 1; d < RKNPU_MAX_IOMMU_DOMAIN_NUM; d++) {
-			unsigned long key = rknpu_gem_dma_token_key(d, dma_addr);
-
-			rknpu_obj = xa_load(&rknpu_dev->gem_dma_xa, key);
-			if (rknpu_obj && rknpu_obj->base.dev == drm) {
-				rknpu_gem_object_get(&rknpu_obj->base);
-				return rknpu_obj;
-			}
-		}
+	/* A foreign same-IOVA candidate must not hide a later owned object. */
+	for (d = 1; d < RKNPU_MAX_IOMMU_DOMAIN_NUM; d++) {
+		if (d == preferred)
+			continue;
+		obj = rknpu_gem_dma_token_get(drm, file_priv,
+			rknpu_gem_dma_token_key(d, dma_addr));
+		if (obj)
+			return obj;
 	}
 
 	return NULL;
@@ -814,6 +859,7 @@ bool rknpu_gem_object_is_file_handle(struct drm_file *file_priv,
 {
 	struct drm_gem_object *obj;
 	int id;
+	u64 visited = 0;
 	bool found = false;
 
 	if (!file_priv || !rknpu_obj)
@@ -821,12 +867,15 @@ bool rknpu_gem_object_is_file_handle(struct drm_file *file_priv,
 
 	spin_lock(&file_priv->table_lock);
 	idr_for_each_entry(&file_priv->object_idr, obj, id) {
+		visited++;
 		if (obj == &rknpu_obj->base) {
 			found = true;
 			break;
 		}
 	}
 	spin_unlock(&file_priv->table_lock);
+	rknpu_mem_stat_add(rknpu_obj->base.dev->dev_private,
+			   RKNPU_MEM_STAT_OWNER_ENTRIES, visited);
 
 	return found;
 }
@@ -835,23 +884,26 @@ struct rknpu_gem_object *
 rknpu_gem_object_find_token(struct drm_device *drm,
 			    struct drm_file *file_priv, u64 token)
 {
-	struct rknpu_gem_object *rknpu_obj = NULL;
+	struct rknpu_device *rknpu_dev = drm->dev_private;
+	struct rknpu_gem_object *obj;
+	u64 start = unlikely(mem_profile) ? ktime_get_ns() : 0;
 
 	if (token && token <= U32_MAX) {
-		rknpu_obj = rknpu_gem_object_find(file_priv, (u32)token);
-		if (rknpu_obj)
-			return rknpu_obj;
+		obj = rknpu_gem_object_find(file_priv, (u32)token);
+		if (obj) {
+			rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_HANDLE_HIT, 1);
+			goto out;
+		}
 	}
 
-	rknpu_obj = rknpu_gem_object_find_by_dma(drm, file_priv, token);
-	if (!rknpu_obj)
-		return NULL;
-	if (!rknpu_gem_object_is_file_handle(file_priv, rknpu_obj)) {
-		rknpu_gem_object_put(&rknpu_obj->base);
-		return NULL;
-	}
-
-	return rknpu_obj;
+	rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_DMA_FALLBACK, 1);
+	/* The DMA helper returns a referenced, caller-owned object. */
+	obj = rknpu_gem_object_find_by_dma(drm, file_priv, token);
+out:
+	if (unlikely(mem_profile))
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_LOOKUP_NS,
+				   ktime_get_ns() - start);
+	return obj;
 }
 
 static void rknpu_gem_release(struct rknpu_gem_object *rknpu_obj)
@@ -942,9 +994,8 @@ rknpu_gem_object_create(struct drm_device *drm, unsigned int flags,
 	else {
 		ret = rknpu_gem_dma_token_insert(rknpu_dev, rknpu_obj);
 		if (ret) {
-			rknpu_gem_dma_token_remove(rknpu_dev, rknpu_obj);
-			rknpu_gem_free_buf(rknpu_obj);
-			rknpu_gem_release(rknpu_obj);
+			/* A concurrent token probe may briefly hold a reference. */
+			rknpu_gem_object_put(&rknpu_obj->base);
 			rknpu_obj = ERR_PTR(ret);
 		}
 	}
@@ -1028,7 +1079,8 @@ int rknpu_gem_create_ioctl(struct drm_device *drm, void *data,
 	ret = rknpu_gem_handle_create(&rknpu_obj->base, file_priv,
 				      &args->handle);
 	if (ret) {
-		rknpu_gem_object_destroy(rknpu_obj);
+		/* Published DMA tokens may have transient lookup references. */
+		rknpu_gem_object_put(&rknpu_obj->base);
 		return ret;
 	}
 
@@ -1205,7 +1257,8 @@ int rknpu_gem_dumb_create(struct drm_file *file_priv, struct drm_device *drm,
 	ret = rknpu_gem_handle_create(&rknpu_obj->base, file_priv,
 				      &args->handle);
 	if (ret) {
-		rknpu_gem_object_destroy(rknpu_obj);
+		/* Published DMA tokens may have transient lookup references. */
+		rknpu_gem_object_put(&rknpu_obj->base);
 		return ret;
 	}
 	rknpu_gem_object_put(&rknpu_obj->base);
@@ -1430,14 +1483,71 @@ int rknpu_gem_core_mapping(struct rknpu_gem_object *rknpu_obj,
 }
 EXPORT_SYMBOL_GPL(rknpu_gem_core_mapping);
 
-void rknpu_gem_sync_core_maps(struct rknpu_gem_object *rknpu_obj,
-			      unsigned int flags)
+/*
+ * These private-IOMMU SG tables describe physical pages, not dma_map_sg()
+ * mappings. Keep the existing SG cache-maintenance API: passing their NPU
+ * IOVAs to dma_sync_single_range_* would use the wrong DMA domain.
+ * Clip into a small stack batch; never mutate the shared object's SG table.
+ * The DMA backend handles cache-line edges and the completion barriers.
+ */
+static int rknpu_gem_sync_sg_range(struct device *dev, struct sg_table *sgt,
+				  unsigned long offset, unsigned long size,
+				  unsigned int flags)
 {
+	struct scatterlist range[16], *sg;
+	unsigned int count = 0;
+	int i;
+
+	sg_init_table(range, ARRAY_SIZE(range));
+	for_each_sgtable_sg(sgt, sg, i) {
+		unsigned long start, length;
+
+		if (offset >= sg->length) {
+			offset -= sg->length;
+			continue;
+		}
+		length = min_t(unsigned long, size, sg->length - offset);
+		start = sg->offset + offset;
+		sg_set_page(&range[count],
+			    pfn_to_page(page_to_pfn(sg_page(sg)) +
+					(start >> PAGE_SHIFT)),
+			    length, offset_in_page(start));
+		sg_dma_address(&range[count]) = sg_phys(&range[count]);
+		sg_dma_len(&range[count]) = length;
+		count++;
+		size -= length;
+		offset = 0;
+		if (count == ARRAY_SIZE(range) || !size) {
+			sg_mark_end(&range[count - 1]);
+			if (flags & RKNPU_MEM_SYNC_TO_DEVICE)
+				dma_sync_sg_for_device(dev, range, count,
+						       DMA_BIDIRECTIONAL);
+			if (flags & RKNPU_MEM_SYNC_FROM_DEVICE)
+				dma_sync_sg_for_cpu(dev, range, count,
+						    DMA_BIDIRECTIONAL);
+			if (!size)
+				return 0;
+			count = 0;
+			sg_init_table(range, ARRAY_SIZE(range));
+		}
+	}
+	/* The object's backing must cover every validated request. */
+	return -EIO;
+}
+
+static int rknpu_gem_sync_core_maps(struct rknpu_gem_object *rknpu_obj,
+			      unsigned int flags, unsigned long offset,
+			      unsigned long size)
+{
+	struct rknpu_device *rknpu_dev = rknpu_obj->base.dev->dev_private;
+	unsigned int directions = !!(flags & RKNPU_MEM_SYNC_TO_DEVICE) +
+				  !!(flags & RKNPU_MEM_SYNC_FROM_DEVICE);
 	int core;
 
 	for (core = 0; core < RKNPU_GEM_MAX_CORE_MAPS; core++) {
 		struct rknpu_gem_core_map *map = &rknpu_obj->core_maps[core];
 		struct device *core_dev;
+		int ret;
 
 		if (!map->mapped || !map->sgt)
 			continue;
@@ -1450,27 +1560,39 @@ void rknpu_gem_sync_core_maps(struct rknpu_gem_object *rknpu_obj,
 		 * All core mappings share the same physical pages; syncing once
 		 * performs the cache maintenance globally across all cores.
 		 */
-		if (flags & RKNPU_MEM_SYNC_TO_DEVICE)
-			dma_sync_sgtable_for_device(core_dev, map->sgt,
-						    DMA_BIDIRECTIONAL);
-		if (flags & RKNPU_MEM_SYNC_FROM_DEVICE)
-			dma_sync_sgtable_for_cpu(core_dev, map->sgt,
-						 DMA_BIDIRECTIONAL);
-		break;
+		ret = rknpu_gem_sync_sg_range(core_dev, map->sgt, offset, size, flags);
+		if (ret) {
+			LOG_DEV_ERROR(core_dev,
+				      "GEM sync backing does not cover offset=%lu size=%lu\n",
+				      offset, size);
+			return ret;
+		}
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_RANGE_CALLS, 1);
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_EFFECTIVE_BYTES,
+				   (u64)size * directions);
+		return 0;
 	}
+	LOG_DEV_ERROR(rknpu_dev->dev, "GEM sync has no usable core mapping\n");
+	return -ENXIO;
 }
 
 int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 			 struct drm_file *file_priv)
 {
 	struct rknpu_mem_sync *args = data;
+	struct rknpu_device *rknpu_dev = dev->dev_private;
 	struct rknpu_gem_object *rknpu_obj;
+	u64 start = unlikely(mem_profile) ? ktime_get_ns() : 0;
 	int ret = 0;
+
+	rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_CALLS, 1);
 
 	rknpu_obj = rknpu_gem_object_find_token(dev, file_priv,
 						args->obj_addr);
-	if (!rknpu_obj)
-		return -ENOENT;
+	if (!rknpu_obj) {
+		ret = -ENOENT;
+		goto out_stats;
+	}
 	if (rknpu_obj->base.dev != dev) {
 		ret = -EINVAL;
 		goto out_put;
@@ -1497,7 +1619,10 @@ int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 		goto out_put;
 	}
 
+	rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_REQUEST_BYTES,
+			   args->size);
 	if (rknpu_obj->base.import_attach) {
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_IMPORT_CALLS, 1);
 		/* Pair begin and end CPU access for the complete DMA-BUF. */
 		if (args->offset || args->size != rknpu_obj->size) {
 			ret = -EOPNOTSUPP;
@@ -1511,9 +1636,25 @@ int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 		ret = dma_buf_end_cpu_access(rknpu_obj->base.dma_buf,
 					     DMA_BIDIRECTIONAL);
 	} else if (rknpu_obj->pages_backed) {
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_PAGES_CALLS, 1);
+		if (args->offset || args->size != rknpu_obj->size)
+			rknpu_mem_stat_add(rknpu_dev,
+					   RKNPU_MEM_STAT_SYNC_PARTIAL_CALLS, 1);
+		/* Both byte counters use the same per-direction accounting. */
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_PAGES_REQUEST_BYTES,
+			args->size *
+			(!!(args->flags & RKNPU_MEM_SYNC_TO_DEVICE) +
+			 !!(args->flags & RKNPU_MEM_SYNC_FROM_DEVICE)));
+		/* Logical whole-buffer bytes per requested direction, not bus traffic. */
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_WHOLE_BYTES,
+			rknpu_obj->size *
+			(!!(args->flags & RKNPU_MEM_SYNC_TO_DEVICE) +
+			 !!(args->flags & RKNPU_MEM_SYNC_FROM_DEVICE)));
 		/* Sync the mapped sg_table for cache maintenance. */
-		rknpu_gem_sync_core_maps(rknpu_obj, args->flags);
+		ret = rknpu_gem_sync_core_maps(rknpu_obj, args->flags,
+					     args->offset, args->size);
 	} else {
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_OTHER_CALLS, 1);
 		if (args->flags & RKNPU_MEM_SYNC_TO_DEVICE)
 			dma_sync_single_range_for_device(
 				dev->dev, rknpu_obj->dma_addr, args->offset,
@@ -1526,6 +1667,12 @@ int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 
 out_put:
 	rknpu_gem_object_put(&rknpu_obj->base);
+out_stats:
+	if (ret)
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_ERRORS, 1);
+	if (unlikely(mem_profile))
+		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_NS,
+				   ktime_get_ns() - start);
 	return ret;
 }
 

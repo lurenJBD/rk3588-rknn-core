@@ -886,6 +886,8 @@ static int rknpu_probe(struct platform_device *pdev)
 		rknpu_dev->cores = facade->cores_storage;
 
 		xa_init(&rknpu_dev->gem_dma_xa);
+		for (int i = 0; i < RKNPU_MEM_STAT_COUNT; i++)
+			atomic64_set(&rknpu_dev->mem_stats[i], 0);
 		ida_init(&rknpu_dev->domain_ida);
 
 		rknpu_dev->config = config;

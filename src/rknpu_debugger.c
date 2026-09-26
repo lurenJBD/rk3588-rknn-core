@@ -20,6 +20,7 @@
 #include "rknpu_reset.h"
 #include "rknpu_debugger.h"
 #include "rknpu_devfreq.h"
+#include "rknpu_gem.h"
 
 #define RKNPU_DEBUGGER_ROOT_NAME "rknpu"
 static int rknpu_version_show(struct seq_file *m, void *data)
@@ -453,7 +454,17 @@ static ssize_t rknpu_reset_set(struct file *file, const char __user *ubuf,
 	return len;
 }
 
+static int rknpu_mem_stats_show(struct seq_file *m, void *data)
+{
+	struct rknpu_debugger_node *node = m->private;
+	struct rknpu_device *dev = container_of(node->debugger,
+						struct rknpu_device, debugger);
+
+	return rknpu_gem_mem_stats_show(m, dev);
+}
+
 static struct rknpu_debugger_list rknpu_debugger_root_list[] = {
+	{ "mem_stats", rknpu_mem_stats_show, NULL, NULL },
 	{ "version", rknpu_version_show, NULL, NULL },
 	{ "load", rknpu_load_show, NULL, NULL },
 	{ "power", rknpu_power_show, rknpu_power_set, NULL },

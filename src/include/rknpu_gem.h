@@ -27,6 +27,10 @@
 
 #define RKNPU_GEM_MAX_CORE_MAPS 3
 
+struct seq_file;
+struct rknpu_device;
+int rknpu_gem_mem_stats_show(struct seq_file *m, struct rknpu_device *rknpu_dev);
+
 struct rknpu_gem_core_map {
 	struct sg_table *sgt;
 	dma_addr_t dma_addr;
@@ -202,13 +206,6 @@ int rknpu_gem_prime_mmap(struct drm_gem_object *obj,
 
 int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 			 struct drm_file *file_priv);
-
-/*
- * Cache maintenance for one core's mapping of an object without going
- * through the ioctl.
- */
-void rknpu_gem_sync_core_maps(struct rknpu_gem_object *rknpu_obj,
-			      unsigned int flags);
 
 static inline void *rknpu_gem_alloc_page(size_t nr_pages)
 {

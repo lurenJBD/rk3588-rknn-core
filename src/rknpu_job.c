@@ -1377,25 +1377,33 @@ static bool rknpu_core_mask_is_supported(struct rknpu_device *rknpu_dev,
 }
 
 static bool rknpu_submit_task_base_is_valid(struct rknpu_submit *args,
-					    struct rknpu_gem_object *task_obj)
+						    struct rknpu_gem_object *task_obj)
 {
-	unsigned int core_index;
+	unsigned int core_mask = args->core_mask;
+	dma_addr_t dma_addr = args->task_base_addr;
+	int core;
 
 	/*
-	 * AUTO uses core0 for validation (submit_checked set task_base_addr
-	 * from core0's mapping). The scheduler resolves the actual core later.
+	 * AUTO is validated against the canonical core-0 mapping; the scheduler
+	 * resolves it to one core later. For a combined mask, every selected core
+	 * must expose the same IOVA because the task stream contains one address
+	 * namespace and is armed independently on each core.
 	 */
-	if (args->core_mask == RKNPU_CORE_AUTO_MASK) {
-		core_index = 0;
-	} else {
-		if (hweight32(args->core_mask) != 1)
+	if (core_mask == RKNPU_CORE_AUTO_MASK)
+		core_mask = RKNPU_CORE0_MASK;
+
+	if (!core_mask || core_mask & ~((1U << RKNPU_MAX_CORES) - 1))
+		return false;
+
+	for (core = 0; core < RKNPU_MAX_CORES; core++) {
+		if (!(core_mask & rknpu_core_mask(core)))
+			continue;
+		if (!task_obj->core_maps[core].mapped ||
+		    task_obj->core_maps[core].dma_addr != dma_addr)
 			return false;
-		core_index = ffs(args->core_mask) - 1;
 	}
 
-	return task_obj->core_maps[core_index].mapped &&
-	       args->task_base_addr ==
-			task_obj->core_maps[core_index].dma_addr;
+	return true;
 }
 
 static int rknpu_submit_full(struct rknpu_device *rknpu_dev,
@@ -1592,9 +1600,8 @@ static int rknpu_submit_checked(struct rknpu_device *rknpu_dev,
 	if (is_auto) {
 		core_index = 0;
 	} else {
-		if (hweight32(core_mask) != 1 ||
-		    core_mask & ~rknpu_dev->config->core_mask) {
-			LOG_ERROR("one target core per submit is supported, mask=%#x\n",
+		if (!rknpu_core_mask_is_supported(rknpu_dev, core_mask)) {
+			LOG_ERROR("unsupported rknpu core mask: %#x\n",
 				  args->core_mask);
 			return -EOPNOTSUPP;
 		}
@@ -1619,15 +1626,31 @@ static int rknpu_submit_checked(struct rknpu_device *rknpu_dev,
 		return -EINVAL;
 	}
 
-	/* Validate buffer mapping against the validation core. */
-	if (!task_obj->core_maps[core_index].mapped ||
-	    !task_obj->core_maps[core_index].sgt) {
-		LOG_ERROR("task buffer is not mapped on core %u, buffer mask=%#x\n",
-			  core_index, task_obj->core_mask);
-		return -EINVAL;
+	/* Validate every selected core mapping and require one shared IOVA. */
+	dma_addr = 0;
+	for (int mapped_core = 0;
+	     mapped_core < rknpu_dev->config->num_irqs; mapped_core++) {
+		if (is_auto && mapped_core != 0)
+			continue;
+		if (!is_auto && !(core_mask & rknpu_core_mask(mapped_core)))
+			continue;
+		if (!task_obj->core_maps[mapped_core].mapped ||
+		    !task_obj->core_maps[mapped_core].sgt) {
+			LOG_ERROR("task buffer is not mapped on core %u, buffer mask=%#x\n",
+				  mapped_core, task_obj->core_mask);
+			return -EINVAL;
+		}
+		if (!dma_addr)
+			dma_addr = task_obj->core_maps[mapped_core].dma_addr;
+		else if (task_obj->core_maps[mapped_core].dma_addr != dma_addr) {
+			LOG_ERROR("task buffer IOVA differs on core %u: %#llx != %#llx\n",
+				  mapped_core, task_obj->core_maps[mapped_core].dma_addr,
+				  dma_addr);
+			return -EINVAL;
+		}
 	}
-
-	dma_addr = task_obj->core_maps[core_index].dma_addr;
+	if (!dma_addr)
+		return -EINVAL;
 	if (args->task_base_addr && args->task_base_addr != dma_addr) {
 		LOG_ERROR("task base address mismatch: %#llx != %#llx\n",
 			  args->task_base_addr, dma_addr);
@@ -1652,30 +1675,47 @@ static int rknpu_submit_checked(struct rknpu_device *rknpu_dev,
 	 * the resolved core's slot.
 	 */
 	if (rknpu_dev->config->num_irqs > 1) {
-		struct rknpu_subcore_task *subcore =
-			&args->subcore_task[core_index];
+		unsigned int selected = is_auto ? RKNPU_CORE0_MASK : core_mask;
+		unsigned int use_core_num = hweight32(selected);
+		int selected_core;
 
-		if (!subcore->task_number) {
-			if (!rknpu_task_range_is_valid(task_obj->size,
+		for (selected_core = 0;
+		     selected_core < rknpu_dev->config->num_irqs;
+		     selected_core++) {
+			struct rknpu_subcore_task *subcore;
+			unsigned int slot;
+
+			if (!(selected & rknpu_core_mask(selected_core)))
+				continue;
+			slot = use_core_num == 3 ? selected_core + 2 : selected_core;
+			subcore = &args->subcore_task[slot];
+
+			if (!subcore->task_number) {
+				if (use_core_num > 1) {
+					LOG_ERROR("missing subcore_task[%u] for core %u\n",
+						  slot, selected_core);
+					return -EINVAL;
+				}
+				if (!rknpu_task_range_is_valid(task_obj->size,
 						       args->task_start,
 						       args->task_number)) {
-				LOG_ERROR("invalid rknpu task range! start=%u number=%u size=%lu\n",
-					  args->task_start, args->task_number,
-					  task_obj->size);
-				return -EINVAL;
-			}
-			LOG_WARN("subcore_task[%u] empty, using top-level task range %u..%u\n",
-				 core_index, args->task_start,
-				 args->task_number);
-			subcore->task_start = args->task_start;
-			subcore->task_number = args->task_number;
-		} else if (!rknpu_task_range_is_valid(task_obj->size,
+					LOG_ERROR("invalid rknpu task range! start=%u number=%u size=%lu\n",
+						  args->task_start, args->task_number,
+						  task_obj->size);
+					return -EINVAL;
+				}
+				LOG_WARN("subcore_task[%u] empty, using top-level task range %u..%u\n",
+						 slot, args->task_start, args->task_number);
+				subcore->task_start = args->task_start;
+				subcore->task_number = args->task_number;
+			} else if (!rknpu_task_range_is_valid(task_obj->size,
 						      subcore->task_start,
 						      subcore->task_number)) {
-			LOG_ERROR("subcore_task[%u] out of range: start=%u number=%u buffer_size=%lu\n",
-				  core_index, subcore->task_start,
-				  subcore->task_number, task_obj->size);
-			return -EINVAL;
+				LOG_ERROR("subcore_task[%u] out of range: start=%u number=%u buffer_size=%lu\n",
+						  slot, subcore->task_start,
+						  subcore->task_number, task_obj->size);
+				return -EINVAL;
+			}
 		}
 	} else {
 		args->subcore_task[core_index].task_start = args->task_start;
@@ -1711,7 +1751,6 @@ int rknpu_submit_ioctl(struct drm_device *dev, void *data,
 
 	struct rknpu_submit *args = data;
 	struct rknpu_gem_object *task_obj = NULL;
-	struct rknpu_file_priv *fpriv = file_priv ? file_priv->driver_priv : NULL;
 	int ret;
 
 	/*
@@ -1724,7 +1763,6 @@ int rknpu_submit_ioctl(struct drm_device *dev, void *data,
 	 * the second rknn_matmul context in a process). drm_gem_object_lookup()
 	 * via idr is cheap, so always resolve the token.
 	 */
-	(void)fpriv;
 	task_obj = rknpu_gem_object_find_token(dev, file_priv,
 					       args->task_obj_addr);
 	if (!task_obj)

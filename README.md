@@ -45,18 +45,27 @@ All testing, performance benchmarks, and LLM load validations were conducted on 
 
 ## Official RKNN & Benchmark Validation Results
 
-All benchmarks below were executed on an **Orange Pi 5 Plus (RK3588)** running mainline Linux **7.2.5** with the NPU operating at **800 MHz**:
+All results below were measured on an Orange Pi 5 Plus (RK3588), running
+mainline Linux 7.2.5 with the NPU at up to 800 MHz. The table records the
+maintained result for each workload; when a newer validation supersedes an
+older value, the older value is replaced rather than listed as a separate
+status entry.
 
 | Benchmark / Demo | Model / Operator Profile | Input Shape & Precision | Measured Performance | Accuracy & Result |
 |---|---|---|---|---|
-| **`rknn_mobilenet_demo`** | Standard Classification (Conv + Depthwise + Softmax) | `[1, 224, 224, 3]` INT8 | **3.10 ms** latency (**~322.8 FPS** peak) | **PASS** (Top-1: Class 156 @ 0.884766) |
-| **`rknn_yolov5_demo`** | Multi-Scale Object Detection (FPN, C3/CSP, SiLU, Anchor Head) | `[1, 640, 640, 3]` INT8 | **25.12 ms** latency (**~40 FPS**) | **PASS** (bus @ 0.69, person @ 0.88/0.87/0.84) |
-| **`rknn_dynshape_inference`** | Dynamic Shape Resizing (MobileNet V2 Inverted Residuals) | Dynamic 3 shapes: 256x256 / 224x224 / 160x160 INT8 | 256x256 @ 129.3 FPS (peak 185.2 FPS / 5.40 ms)<br>224x224 @ 191.4 FPS (peak 227.1 FPS / 4.40 ms)<br>160x160 @ **311.9 FPS** (peak 375.4 FPS / 2.66 ms) | **PASS** (Smooth dynamic shape switching, Top-1: Class 155) |
-| **`rknn_matmul_api_demo`** | Hardware Matrix Multiplication (MatMul Engine) | Matrix Dimension `128x256x512` | FP16 $\to$ FP16: **0.09 ms** (11,236 ops/s, peak 13,333 ops/s)<br>INT8 $\to$ INT32: **0.22 ms** (4,525 ops/s, peak 5,618 ops/s)<br>FP16 $\to$ FP32: **0.16 ms** (6,250 ops/s) | **PASS** (Bit-exact output matching reference calculations) |
-| **`rknn_benchmark`** | 100-loop continuous stress benchmark (`rknn_create_mem_demo`) | `[1, 224, 224, 3]` INT8 | Latency **3.10 ms** (Average **~280 FPS**, peak **322.8 FPS**) | **PASS** (0 drops, 0 timeouts, 100% IRQs handled on CPU4..7) |
-| **`mindnano-infer`** | 7.9B-parameter LLM (Ling-3.0-tiny W4A8, 4.4 GiB package) | 4K context, 3-core concurrent decoding | Weight load: **4.1 GiB in 33.17s** (~135 MB/s IOVA)<br>Throughput: **11.0 – 13.6 tokens/sec** | **PASS** (45,224 IRQs across Cores 0/1/2, 0 timeouts, 3 complete conversations generated) |
+| **`rknn_mobilenet_demo`** | Standard Classification (Conv + Depthwise + Softmax) | `[1, 224, 224, 3]` INT8 | **397.478 FPS** / 2.52 ms, 10,000 loops with mask 7 | **PASS** (Top-1: Class 156; Core 0/1/2 IRQs observed) |
+| **`rknn_yolov5_demo`** | Multi-Scale Object Detection (FPN, C3/CSP, SiLU, Anchor Head) | `[1, 640, 640, 3]` INT8 | **22.106 ms** mean, 10 loops; first run 24.551 ms | **PASS** (bus/person detections correct) |
+| **`rknn_dynshape_inference`** | Dynamic Shape Resizing (MobileNet V2 Inverted Residuals) | 256x256 / 224x224 / 160x160 INT8 | Normal mask 7: **195.549 / 256.997 / 372.367 FPS**; zero-copy mask 7: **209.797 / 250.447 / 457.208 FPS** | **PASS** (all shapes classify class 155) |
+| **`rknn_matmul_api_demo`** | Hardware Matrix Multiplication (MatMul Engine) | Matrix dimension `128x256x512` | FP16→FP32 **6097.56 ops/s**; INT8→INT32 **4484.31 ops/s**; FP16→FP16 **12345.68 ops/s** | **PASS** (demo reference comparisons passed) |
+| **`rknn_benchmark`** | Continuous `rknn_create_mem_demo` workload | `[1, 224, 224, 3]` INT8 | **397.478 FPS**, 10,000 loops with mask 7 | **PASS** (no timeout; hardware IRQs observed) |
+| **Three-core submit and fence validation** | Combined-mask graph submits and synchronous / NONBLOCK FENCE_OUT wrappers | Core masks 1/2/3/4/7 and runtime ALL=65535 | Explicit masks passed; fence wrappers **75/75** signalled with no timeout | **PASS** (selected-core IRQ routing and task ranges validated) |
+| **`mindnano-infer`** | Ling3-v6 W4A8 LLM | 8K context, 128 input / 64 output | Median TTFT **829.875 ms**; decode **11.455 tok/s**; RSS **5767 MiB** | **PASS** (self-check passed; consistent output; all three cores generated IRQs) |
 
----
+The driver validates shared task-buffer IOVA and per-core task ranges for
+combined masks. `AUTO=0` selects one least-loaded core and does not split or
+round-robin serial submissions. Missing multicore ranges are rejected rather
+than inferred. These tests do not cover every failure mode, FENCE_IN, or fault
+injection.
 
 ## Memory Bandwidth & Mainline DMC Architecture Facts
 
@@ -77,10 +86,11 @@ All benchmarks below were executed on an **Orange Pi 5 Plus (RK3588)** running m
 
 ### 3. Engineering Implications for NPU & LLM Decode
 - **DRAM Bandwidth Bounds**: Large Language Model decoding (autoregressive token generation) is strictly memory-bandwidth-bound, as weights must be streamed from DRAM once per token.
-- **Fastpath Driver Mitigations**: Because mainline lacks dynamic DMC QoS bias, driver-level software overhead directly impacts effective inference latency. This driver incorporates dedicated submit fastpaths:
-  1. **Zero-Allocation Stack Reuse**: Bypasses `kmemdup`/`kfree` for blocking submissions to eliminate kernel allocator contention.
-  2. **Task Token Hot-Cache**: Directly resolves repeated task objects without O(N) IDR scans.
-  3. **IOMMU Detach Early-Exit**: Eliminates global mutex lock contention across inactive subcores during inference cycles.
+- **Driver Memory and Submit Paths**: Because mainline lacks dynamic DMC QoS bias, driver-level software overhead directly impacts effective inference latency. The driver therefore uses:
+  1. **Zero-Allocation Stack Reuse**: Bypasses `kmemdup`/`kfree` for blocking submissions to reduce allocator overhead.
+  2. **Referenced Token Lookup**: Normal tokens use DRM handle lookup. Legacy DMA tokens acquire a live reference under the index lock and verify file ownership; stale task-object caches are not retained.
+  3. **IOMMU Detach Early-Exit**: Avoids global mutex work for inactive subcores during inference cycles.
+  4. **Range-Based Cache Synchronization**: Pages-backed buffers synchronize the requested offset and size using stack SG batches, including full-buffer requests. Imported DMA-BUF objects use their exporter CPU-access protocol, while contiguous DMA allocations use the DMA range API. Missing mappings or incomplete backing return an error instead of silently succeeding or falling back to whole-buffer synchronization.
 
 ---
 
@@ -169,6 +179,11 @@ The module provides the following runtime parameters (configurable via `modprobe
 | `bypass_soft_reset` | `int` | `0` | Set to `1` to bypass hardware soft reset upon submit (default `0`). |
 | `rknpu_debug_log` | `bool` | `false` | Enable verbose per-submit/per-IRQ debug logging (can be toggled via `/sys/module/rknpu/parameters/rknpu_debug_log`). |
 | `per_fd_domain` | `bool` | `true` | Enable per-FD IOMMU domain isolation for client processes. |
+| `mem_profile` | `bool` | `false` | Load-time diagnostics: memory lookup/sync counters and timing at read-only debugfs `rknpu/mem_stats`. Keep disabled for performance measurements. |
+
+Range-based cache sync is the default and has no enable/compatibility switch.
+Imported DMA-BUF objects use their exporter's begin/end CPU-access protocol;
+contiguous DMA allocations use their existing DMA range API.
 
 ---
 
