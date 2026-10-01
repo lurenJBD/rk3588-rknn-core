@@ -1110,6 +1110,26 @@ static int rknpu_job_recover_device(struct rknpu_device *rknpu_dev,
 			continue;
 		jobs[count++] = job;
 	}
+
+	/*
+	 * Jobs still queued when a recovery fired have not touched the
+	 * hardware: their timeout_work latched -ETIMEDOUT and marked them
+	 * RECOVERY_PENDING only because they waited too long behind the
+	 * wedged job. Clear both so they report their real outcome when
+	 * they run after the reset, and so the IRQ completion path (which
+	 * skips RECOVERY_PENDING jobs) accepts them again.
+	 */
+	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
+		struct rknpu_job *queued;
+
+		list_for_each_entry(queued,
+				    &rknpu_dev->subcore_datas[i].todo_list,
+				    head[i]) {
+			queued->flags &= ~RKNPU_JOB_RECOVERY_PENDING;
+			if (queued->ret == -ETIMEDOUT)
+				queued->ret = 0;
+		}
+	}
 	spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
 
 	reset_ret = rknpu_reset_execute(rknpu_dev);
