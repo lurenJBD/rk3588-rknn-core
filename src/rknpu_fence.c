@@ -36,6 +36,7 @@ int rknpu_fence_context_alloc(struct rknpu_device *rknpu_dev)
 		return -ENOMEM;
 
 	fence_ctx->context = dma_fence_context_alloc(1);
+	atomic_set(&fence_ctx->seqno, 0);
 	spin_lock_init(&fence_ctx->spinlock);
 
 	rknpu_dev->fence_ctx = fence_ctx;
@@ -58,8 +59,13 @@ int rknpu_fence_alloc(struct rknpu_job *job)
 	if (!fence)
 		return -ENOMEM;
 
+	/*
+	 * Concurrent submitters share one context; the seqno increment must
+	 * be atomic or two live fences can carry the same (context, seqno).
+	 */
 	dma_fence_init(fence, &rknpu_fence_ops, &fence_ctx->spinlock,
-		       fence_ctx->context, ++fence_ctx->seqno);
+		       fence_ctx->context,
+		       atomic_inc_return(&fence_ctx->seqno));
 
 	job->fence = fence;
 
