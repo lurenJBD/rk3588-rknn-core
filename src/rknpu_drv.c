@@ -742,7 +742,13 @@ int rknpu_power_get(struct rknpu_device *rknpu_dev)
 		rknpu_dev->cores[i].power_held = true;
 	}
 
-	rknpu_devfreq_runtime_resume(rknpu_dev->cores[0].dev);
+	/*
+	 * Cores can be removed one by one (runtime unbind) while the DRM
+	 * device stays alive; core 0 may already be gone. The devfreq hooks
+	 * dereference dev immediately, so guard instead of oopsing.
+	 */
+	if (rknpu_dev->cores[0].dev)
+		rknpu_devfreq_runtime_resume(rknpu_dev->cores[0].dev);
 
 	mutex_unlock(&rknpu_dev->power_lock);
 	return 0;
@@ -830,7 +836,8 @@ static void rknpu_power_off(struct rknpu_device *rknpu_dev)
 {
 	unsigned int i;
 
-	rknpu_devfreq_runtime_suspend(rknpu_dev->cores[0].dev);
+	if (rknpu_dev->cores[0].dev)
+		rknpu_devfreq_runtime_suspend(rknpu_dev->cores[0].dev);
 
 	for (i = 0; i < RKNPU_MAX_CORES; i++)
 		rknpu_core_release_power(rknpu_dev, i);
@@ -926,9 +933,17 @@ static int rknpu_probe(struct platform_device *pdev)
 		 * (cores * supplies) handles that no later path can release.
 		 */
 		rknpu_core_release_regulators(&rknpu_dev->cores[index]);
-		if (created)
+		if (created) {
 			kfree(rknpu_global);
-		rknpu_global = NULL;
+			rknpu_global = NULL;
+		}
+		/*
+		 * When joining an existing facade (!created) the facade stays
+		 * alive: other cores are still bound to it. NULLing
+		 * rknpu_global here (e.g. on -EPROBE_DEFER of a later core)
+		 * would orphan it; the retried probe would build a second
+		 * facade that can never re-assemble all cores.
+		 */
 		mutex_unlock(&rknpu_global_lock);
 		return ret;
 	}
@@ -1086,9 +1101,16 @@ static void rknpu_remove(struct platform_device *pdev)
 
 	}
 
-	/* Drop per-core runtime-PM and regulator references before devm cleanup. */
+	/*
+	 * Drop per-core runtime-PM and regulator references before devm
+	 * cleanup. Zero the refcounts only when the last core is gone:
+	 * zeroing on every single-core removal would silence the puts of
+	 * holders that are still active and let the next power_get()
+	 * double-enable regulators / runtime PM on the remaining cores.
+	 */
 	mutex_lock(&rknpu_dev->power_lock);
-	if (atomic_read(&rknpu_dev->power_refcount) > 0) {
+	if (rknpu_dev->available_cores == 0 &&
+	    atomic_read(&rknpu_dev->power_refcount) > 0) {
 		atomic_set(&rknpu_dev->power_refcount, 0);
 		atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
 	}
