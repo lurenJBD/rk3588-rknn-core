@@ -176,7 +176,7 @@ The module provides the following runtime parameters (configurable via `modprobe
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `target_freq_mhz` | `int` | `800` | Target operational frequency in MHz (safe baseline range: 200–800 MHz). |
-| `bypass_soft_reset` | `int` | `0` | Set to `1` to bypass hardware soft reset upon submit (default `0`). |
+| `bypass_soft_reset` | `int` | `0` | Set to `1` to bypass hardware soft reset upon submit (default `0`). **Warning:** with `1`, job timeout/abort recovery cannot quiesce the core (`rknpu_reset_begin()` returns `-EOPNOTSUPP`), so the core stays owned by the dead job and every later submit on it queues forever — use only for debugging. |
 | `rknpu_debug_log` | `bool` | `false` | Enable verbose per-submit/per-IRQ debug logging (can be toggled via `/sys/module/rknpu/parameters/rknpu_debug_log`). |
 | `per_fd_domain` | `bool` | `true` | Enable per-FD IOMMU domain isolation for client processes. |
 | `mem_profile` | `bool` | `false` | Load-time diagnostics: memory lookup/sync counters and timing at read-only debugfs `rknpu/mem_stats`. Keep disabled for performance measurements. |
