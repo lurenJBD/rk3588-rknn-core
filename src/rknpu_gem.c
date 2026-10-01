@@ -492,12 +492,14 @@ static int rknpu_gem_alloc_buf(struct rknpu_gem_object *rknpu_obj)
 					drm->dev,
 					"failed to allocate non-contiguous %lu buffer.\n",
 					rknpu_obj->size);
+				ret = -ENOMEM;
 				goto err_free;
 			}
 		} else {
 			LOG_DEV_ERROR(drm->dev,
 				      "failed to allocate %lu buffer.\n",
 				      rknpu_obj->size);
+			ret = -ENOMEM;
 			goto err_free;
 		}
 	}
