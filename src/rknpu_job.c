@@ -508,6 +508,17 @@ static inline int rknpu_job_wait(struct rknpu_job *job)
 
 	last_task->int_status = job->int_status[core_index];
 
+	/*
+	 * The register block can be gone if the core was unbound while this
+	 * ioctl was in flight; rknpu_core_read() dereferences base[core]
+	 * without a NULL check.
+	 */
+	if (ret <= 0 && !rknpu_dev->base[core_index]) {
+		LOG_ERROR("core %u registers unmapped (device removed); skipping timeout diagnostics\n",
+			  core_index);
+		return ret < 0 ? ret : -ETIMEDOUT;
+	}
+
 	if (ret <= 0) {
 		uint32_t int_raw_status = REG_READ(RKNPU_CORE_REG_INT_RAW_STATUS);
 		uint32_t int_status = REG_READ(RKNPU_CORE_REG_INT_STATUS);
@@ -816,16 +827,19 @@ static void rknpu_job_next(struct rknpu_device *rknpu_dev, int core_index)
 	struct rknpu_subcore_data *subcore_data = NULL;
 	unsigned long flags;
 
-	if (READ_ONCE(rknpu_dev->shutting_down) ||
-	    READ_ONCE(rknpu_dev->soft_reseting) ||
-	    READ_ONCE(rknpu_dev->reset_failed))
-		return;
-
 	subcore_data = &rknpu_dev->subcore_datas[core_index];
 
 	spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
 
-	if (subcore_data->job || list_empty(&subcore_data->todo_list)) {
+	/*
+	 * Re-check the reset state under irq_lock: soft_reseting is set
+	 * under this lock, so checking before the lock (as before) let a
+	 * fresh submit slip between the check and reset_begin.
+	 */
+	if (READ_ONCE(rknpu_dev->shutting_down) ||
+	    READ_ONCE(rknpu_dev->soft_reseting) ||
+	    READ_ONCE(rknpu_dev->reset_failed) ||
+	    subcore_data->job || list_empty(&subcore_data->todo_list)) {
 		spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
 		return;
 	}
@@ -858,12 +872,20 @@ static void rknpu_job_done(struct rknpu_job *job, int ret, int core_index)
 	/*
 	 * Re-arm while the submit's range still has sections left. The stride
 	 * is one section, so a single large batch runs to the end.
+	 *
+	 * Decide under irq_lock and never re-arm a job that recovery has
+	 * claimed (or that is already finalized), nor while a soft reset is
+	 * in flight: programming PC registers into a core being reset can
+	 * interleave two task streams.
 	 */
+	spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
 	if (!ret &&
+	    !(job->flags & (RKNPU_JOB_FINALIZED |
+			    RKNPU_JOB_RECOVERY_PENDING)) &&
+	    !READ_ONCE(rknpu_dev->soft_reseting) &&
 	    submit_count <
 		    DIV_ROUND_UP_ULL(task_number, rknpu_pc_arm_step(rknpu_dev))) {
 		now = ktime_get();
-		spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
 		subcore_data->timer.busy_time +=
 			ktime_sub(now, job->hw_recoder_time[core_index]);
 		job->hw_recoder_time[core_index] = now;
@@ -871,6 +893,8 @@ static void rknpu_job_done(struct rknpu_job *job, int ret, int core_index)
 		ret = rknpu_job_subcore_commit(job, core_index);
 		if (!ret)
 			return;
+	} else {
+		spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
 	}
 
 	spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
@@ -1327,7 +1351,14 @@ static inline irqreturn_t rknpu_irq_handler(int irq, void *data, int core_index)
 	REG_WRITE(RKNPU_INT_CLEAR, RKNPU_CORE_REG_INT_CLEAR);
 
 	spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
-	if (subcore_data->job == job && !job->core_done[core_index])
+	/*
+	 * A job flagged for recovery (or already finalized) is owned by the
+	 * recovery path, which detaches and finalizes it around the soft
+	 * reset; completing a section here would re-arm the core mid-reset.
+	 */
+	if (!(job->flags & (RKNPU_JOB_FINALIZED |
+			    RKNPU_JOB_RECOVERY_PENDING)) &&
+	    subcore_data->job == job && !job->core_done[core_index])
 		complete = true;
 	spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
 
