@@ -216,15 +216,41 @@ static int rknpu_devfreq_get_dev_status(struct device *dev,
 				      struct devfreq_dev_status *stat)
 {
 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
+	ktime_t now, total, busy = 0, delta;
+	unsigned long flags;
+	int i;
 
 	if (!rknpu_dev)
 		return -EINVAL;
 
 	stat->current_frequency = rknpu_dev->current_freq ?
 				  rknpu_dev->current_freq : RKNPU_FREQ_MIN;
-	stat->total_time = 100;
-	stat->busy_time = (rknpu_dev->cores[0].power_held &&
-			   atomic_read(&rknpu_dev->power_refcount) > 0) ? 100 : 0;
+
+	/*
+	 * Report the utilization actually measured by the per-core load
+	 * timers instead of "100% whenever power is held": the busiest
+	 * core drives the frequency need, so one saturated core must not
+	 * be downclocked just because its neighbors idle.
+	 */
+	spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
+	now = ktime_get();
+	total = ktime_sub(now, rknpu_dev->devfreq_last_time);
+	rknpu_dev->devfreq_last_time = now;
+	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
+		delta = ktime_sub(rknpu_dev->subcore_datas[i].timer.busy_time,
+				  rknpu_dev->devfreq_last_busy[i]);
+		rknpu_dev->devfreq_last_busy[i] =
+			rknpu_dev->subcore_datas[i].timer.busy_time;
+		if (delta > busy)
+			busy = delta;
+	}
+	spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
+
+	if (busy > total)
+		busy = total;
+
+	stat->total_time = ktime_to_us(total) ?: 1;
+	stat->busy_time = ktime_to_us(busy);
 
 	return 0;
 }
@@ -291,6 +317,12 @@ int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
 		target_hz = RKNPU_FREQ_MAX;
 
 	rknpu_dev->ondemand_freq = target_hz;
+
+	/* Utilization sampling baseline for get_dev_status(). */
+	rknpu_dev->devfreq_last_time = ktime_get();
+	for (i = 0; i < RKNPU_MAX_CORES; i++)
+		rknpu_dev->devfreq_last_busy[i] =
+			rknpu_dev->subcore_datas[i].timer.busy_time;
 
 	/* Dynamically populate OPP table for core 0 device */
 	for (i = 0; i < ARRAY_SIZE(opp_table); i++) {
@@ -372,9 +404,19 @@ int rknpu_devfreq_runtime_resume(struct device *dev)
 {
 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
 	unsigned long target_hz;
+	int i;
 
 	if (!rknpu_dev)
 		return 0;
+
+	/*
+	 * devfreq monitoring was suspended while powered down; restart the
+	 * utilization window so the gap does not dilute the first sample.
+	 */
+	rknpu_dev->devfreq_last_time = ktime_get();
+	for (i = 0; i < RKNPU_MAX_CORES; i++)
+		rknpu_dev->devfreq_last_busy[i] =
+			rknpu_dev->subcore_datas[i].timer.busy_time;
 
 	target_hz = rknpu_dev->ondemand_freq;
 	if (!target_hz)

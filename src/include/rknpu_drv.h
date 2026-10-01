@@ -276,6 +276,9 @@ struct rknpu_device {
 	struct thermal_cooling_device *devfreq_cooling;
 	struct devfreq *devfreq;
 	unsigned long ondemand_freq;
+	/* get_dev_status() utilization deltas (wall/busy snapshots). */
+	ktime_t devfreq_last_time;
+	ktime_t devfreq_last_busy[RKNPU_MAX_CORES];
 	struct rockchip_opp_info opp_info;
 	unsigned long current_freq;
 	unsigned long current_volt;
