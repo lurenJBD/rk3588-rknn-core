@@ -8,11 +8,14 @@
 #ifndef __LINUX_RKNPU_FENCE_H_
 #define __LINUX_RKNPU_FENCE_H_
 
+#include <linux/atomic.h>
+
 #include "rknpu_job.h"
 
 struct rknpu_fence_context {
 	unsigned int context;
-	unsigned int seqno;
+	/* (context, seqno) must stay unique across concurrent submitters. */
+	atomic_t seqno;
 	spinlock_t spinlock;
 };
 
