@@ -1231,8 +1231,18 @@ int rknpu_gem_dumb_create(struct drm_file *file_priv, struct drm_device *drm,
 	 * - this callback would be called by user application
 	 *	with DRM_IOCTL_MODE_CREATE_DUMB command.
 	 */
-	args->pitch = args->width * ((args->bpp + 7) / 8);
-	args->size = args->pitch * args->height;
+	{
+		u64 pitch, size;
+
+		if (check_mul_overflow((u64)args->width,
+				       (u64)((args->bpp + 7) / 8), &pitch) ||
+		    check_mul_overflow(pitch, (u64)args->height, &size) ||
+		    pitch > U32_MAX || size > U32_MAX)
+			return -EINVAL;
+
+		args->pitch = pitch;
+		args->size = size;
+	}
 
 	if (rknpu_dev->iommu_en)
 		flags = RKNPU_MEM_NON_CONTIGUOUS | RKNPU_MEM_WRITE_COMBINE;
@@ -1304,16 +1314,17 @@ int rknpu_gem_mmap_obj(struct drm_gem_object *obj, struct vm_area_struct *vma)
 			pgprot_noncached(vm_get_page_prot(vma->vm_flags));
 	}
 
+	/*
+	 * On failure just return: drm_gem_mmap_obj() took the mapping
+	 * reference before calling funcs->mmap and drops it itself when this
+	 * callback fails. Calling drm_gem_vm_close() here as well would put
+	 * the object twice and free it while the handle is still installed.
+	 */
 	ret = rknpu_gem_mmap_buffer(rknpu_obj, vma);
 	if (ret)
-		goto err_close_vm;
+		return ret;
 
 	return 0;
-
-err_close_vm:
-	drm_gem_vm_close(vma);
-
-	return ret;
 }
 
 int rknpu_gem_mmap(struct file *filp, struct vm_area_struct *vma)
