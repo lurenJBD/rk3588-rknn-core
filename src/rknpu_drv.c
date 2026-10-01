@@ -917,7 +917,8 @@ static int rknpu_probe(struct platform_device *pdev)
 		rknpu_global = facade;
 		created = true;
 	} else {
-		rknpu_dev = &rknpu_global->rknpu_dev;
+		facade = rknpu_global;
+		rknpu_dev = &facade->rknpu_dev;
 	}
 
 	prev_available = rknpu_dev->available_cores;
@@ -1034,8 +1035,12 @@ err_drm_remove:
 err_core_fini:
 	rknpu_core_fini(rknpu_dev, index);
 	rknpu_dev->available_cores = prev_available;
-	if (created)
-		rknpu_global = NULL;
+	/*
+	 * Drop this probe's reference (taken right after core_init). The
+	 * facade itself stays alive for the cores that are already bound;
+	 * the initial reference is released by rknpu_exit().
+	 */
+	kref_put(&facade->refcount, rknpu_facade_release);
 	mutex_unlock(&rknpu_global_lock);
 	return ret;
 }
@@ -1230,8 +1235,21 @@ static int rknpu_init(void)
 
 static void rknpu_exit(void)
 {
+	struct rknpu_facade *facade = rknpu_global;
+
 	platform_driver_unregister(&rknpu_driver);
 	rknpu_job_cache_fini();
+
+	/*
+	 * Drop the initial reference taken at facade creation. After the
+	 * last core's remove() dropped the per-probe references, this one
+	 * is what keeps the facade allocated; releasing it here lets
+	 * rknpu_facade_release() free it (and destroy the ida).
+	 */
+	if (facade) {
+		rknpu_global = NULL;
+		kref_put(&facade->refcount, rknpu_facade_release);
+	}
 }
 
 late_initcall(rknpu_init);
