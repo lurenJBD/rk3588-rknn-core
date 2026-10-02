@@ -1613,8 +1613,29 @@ int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 
 	if (!rknpu_gem_sync_is_valid(args->flags, args->offset, args->size,
 				     rknpu_obj->size)) {
-		ret = -EINVAL;
-		goto out_put;
+		bool flags_ok = args->flags && !(args->flags & ~RKNPU_MEM_SYNC_MASK);
+
+		/*
+		 * Tolerated callers:
+		 *  - zero-length sync is vacuous;
+		 *  - the closed-source runtime occasionally issues ranges
+		 *    larger than the object (live observation: size=0x40000
+		 *    on a 0x20000 cacheable object, flags=TO_DEVICE,
+		 *    offset=0). Clamp to the object extent: maintaining the
+		 *    covered portion beats failing the whole call, which
+		 *    propagates into runtime error paths (embedding API
+		 *    500s). Flags must still be sane and the offset in range.
+		 */
+		if (flags_ok && args->offset <= rknpu_obj->size) {
+			if (args->offset >= rknpu_obj->size || !args->size) {
+				args->size = 0;
+			} else {
+				args->size = rknpu_obj->size - args->offset;
+			}
+		} else {
+			ret = -EINVAL;
+			goto out_put;
+		}
 	}
 
 	if (!(rknpu_obj->flags & RKNPU_MEM_CACHEABLE) &&
@@ -1636,8 +1657,24 @@ int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 			   args->size);
 	if (rknpu_obj->base.import_attach) {
 		rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_IMPORT_CALLS, 1);
-		/* Pair begin and end CPU access for the complete DMA-BUF. */
+		/*
+		 * Sub-buffer sync of an imported DMA-BUF: the cpu-access API
+		 * covers whole buffers only. When the exporter is this same
+		 * driver, maintain caches for the exact range through the
+		 * underlying GEM object instead, so sub-buffer windows stay
+		 * coherent.
+		 */
 		if (args->offset || args->size != rknpu_obj->size) {
+			struct dma_buf *dmabuf = rknpu_obj->base.import_attach->dmabuf;
+			struct drm_gem_object *exp_obj = dmabuf ? dmabuf->priv : NULL;
+
+			if (exp_obj && exp_obj->funcs == &rknpu_gem_object_funcs &&
+			    exp_obj->dev == dev) {
+				ret = rknpu_gem_sync_core_maps(
+					to_rknpu_obj(exp_obj), args->flags,
+					args->offset, args->size);
+				goto out_put;
+			}
 			ret = -EOPNOTSUPP;
 			goto out_put;
 		}
