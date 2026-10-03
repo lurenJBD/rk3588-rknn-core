@@ -1,0 +1,3 @@
+# Generated test assets — third-party models/images/binaries and build output.
+# Never commit: regenerate with ./prepare-test-assets.sh
+assets/
