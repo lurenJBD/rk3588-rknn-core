@@ -1653,6 +1653,10 @@ int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 		goto out_put;
 	}
 
+	/* A validated empty range needs no DMA or exporter operation. */
+	if (!args->size)
+		goto out_put;
+
 	rknpu_mem_stat_add(rknpu_dev, RKNPU_MEM_STAT_SYNC_REQUEST_BYTES,
 			   args->size);
 	if (rknpu_obj->base.import_attach) {
@@ -1666,7 +1670,11 @@ int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 		 */
 		if (args->offset || args->size != rknpu_obj->size) {
 			struct dma_buf *dmabuf = rknpu_obj->base.import_attach->dmabuf;
-			struct drm_gem_object *exp_obj = dmabuf ? dmabuf->priv : NULL;
+			struct drm_gem_object *exp_obj = NULL;
+
+			/* Validate the exporter before reading its private GEM object. */
+			if (dmabuf && drm_gem_is_prime_exported_dma_buf(dev, dmabuf))
+				exp_obj = dmabuf->priv;
 
 			if (exp_obj && exp_obj->funcs == &rknpu_gem_object_funcs &&
 			    exp_obj->dev == dev) {
