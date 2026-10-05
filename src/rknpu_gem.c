@@ -1303,6 +1303,10 @@ int rknpu_gem_mmap_obj(struct drm_gem_object *obj, struct vm_area_struct *vma)
 	struct rknpu_gem_object *rknpu_obj = to_rknpu_obj(obj);
 	int ret = -EINVAL;
 
+	/* Imported handles are not mmap-able; map the exporter dma-buf FD. */
+	if (obj->import_attach)
+		return -EINVAL;
+
 	LOG_DEBUG("flags: %#x\n", rknpu_obj->flags);
 
 	/* non-cacheable as default. */
@@ -1327,26 +1331,6 @@ int rknpu_gem_mmap_obj(struct drm_gem_object *obj, struct vm_area_struct *vma)
 		return ret;
 
 	return 0;
-}
-
-int rknpu_gem_mmap(struct file *filp, struct vm_area_struct *vma)
-{
-	struct drm_gem_object *obj = NULL;
-	int ret = -EINVAL;
-
-	/* set vm_area_struct. */
-	ret = drm_gem_mmap(filp, vma);
-	if (ret < 0) {
-		LOG_ERROR("failed to mmap, ret: %d\n", ret);
-		return ret;
-	}
-
-	obj = vma->vm_private_data;
-
-	if (obj->import_attach)
-		return dma_buf_mmap(obj->dma_buf, vma, 0);
-
-	return rknpu_gem_mmap_obj(obj, vma);
 }
 
 /* low-level interface prime helpers */
@@ -1462,17 +1446,6 @@ void rknpu_gem_prime_vunmap(struct drm_gem_object *obj, struct iosys_map *map)
 		vunmap(map->vaddr);
 		map->vaddr = NULL;
 	}
-}
-
-int rknpu_gem_prime_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma)
-{
-	int ret = -EINVAL;
-
-	ret = drm_gem_mmap_obj(obj, obj->size, vma);
-	if (ret < 0)
-		return ret;
-
-	return rknpu_gem_mmap_obj(obj, vma);
 }
 
 /**

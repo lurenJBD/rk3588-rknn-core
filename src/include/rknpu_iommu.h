@@ -21,6 +21,7 @@ bool rknpu_dma_sg_is_contiguous(struct scatterlist *sgl, int mapped_nents,
 
 int rknpu_iommu_init_domain(struct rknpu_device *rknpu_dev);
 void rknpu_iommu_free_domains(struct rknpu_device *rknpu_dev);
+void rknpu_iommu_reclaim_domain(struct rknpu_device *rknpu_dev, int domain_id);
 int rknpu_iommu_domain_get_and_switch(struct rknpu_device *rknpu_dev,
 				      int domain_id);
 int rknpu_iommu_domain_put(struct rknpu_device *rknpu_dev);

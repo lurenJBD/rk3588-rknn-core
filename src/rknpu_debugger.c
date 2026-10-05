@@ -463,8 +463,43 @@ static int rknpu_mem_stats_show(struct seq_file *m, void *data)
 	return rknpu_gem_mem_stats_show(m, dev);
 }
 
+static int rknpu_iommu_domains_show(struct seq_file *m, void *data)
+{
+	struct rknpu_debugger_node *node = m->private;
+	struct rknpu_device *rknpu_dev =
+		container_of(node->debugger, struct rknpu_device, debugger);
+	int core, id;
+
+	if (!rknpu_dev->iommu_en || !rknpu_dev->iommu_shared_mm_ready)
+		return 0;
+	mutex_lock(&rknpu_dev->iommu_domain_lock);
+	mutex_lock(&rknpu_dev->iommu_shared_mm_lock);
+	for (id = 0; id < RKNPU_MAX_IOMMU_DOMAIN_NUM; id++) {
+		unsigned int allocated = 0, active = 0;
+
+		for (core = 0; core < RKNPU_MAX_CORES; core++) {
+			if (rknpu_dev->iommu_domains[core][id])
+				allocated |= BIT(core);
+			if (rknpu_dev->iommu_active_domain[core] == id)
+				active += rknpu_dev->iommu_active_refcount[core];
+		}
+		if (allocated || rknpu_dev->iommu_domain_live_objs[id] ||
+		    rknpu_dev->iommu_domain_reclaims[id])
+			seq_printf(m, "domain=%d cores=%#x active=%u objs=%llu bytes=%llu reclaimed=%llu fds=%u\n",
+				   id, allocated, active,
+				   rknpu_dev->iommu_domain_live_objs[id],
+				   rknpu_dev->iommu_domain_live_bytes[id],
+				   rknpu_dev->iommu_domain_reclaims[id],
+				   rknpu_dev->iommu_domain_fd_users[id]);
+	}
+	mutex_unlock(&rknpu_dev->iommu_shared_mm_lock);
+	mutex_unlock(&rknpu_dev->iommu_domain_lock);
+	return 0;
+}
+
 static struct rknpu_debugger_list rknpu_debugger_root_list[] = {
 	{ "mem_stats", rknpu_mem_stats_show, NULL, NULL },
+	{ "iommu_domains", rknpu_iommu_domains_show, NULL, NULL },
 	{ "version", rknpu_version_show, NULL, NULL },
 	{ "load", rknpu_load_show, NULL, NULL },
 	{ "power", rknpu_power_show, rknpu_power_set, NULL },
