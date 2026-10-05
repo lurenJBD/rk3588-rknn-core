@@ -227,6 +227,51 @@ int rknpu_iommu_domain_put(struct rknpu_device *rknpu_dev)
 	return 0;
 }
 
+/* Lock order: domain lock, then allocator lock. Reservations pin page tables. */
+void rknpu_iommu_reclaim_domain(struct rknpu_device *rknpu_dev, int domain_id)
+{
+	int core;
+
+	if (!rknpu_dev || domain_id < RKNPU_PER_FD_DOMAIN_START ||
+	    domain_id >= RKNPU_MAX_IOMMU_DOMAIN_NUM ||
+	    !rknpu_dev->iommu_en || !rknpu_dev->iommu_shared_mm_ready ||
+	    READ_ONCE(rknpu_dev->shutting_down))
+		return;
+
+	mutex_lock(&rknpu_dev->iommu_domain_lock);
+	mutex_lock(&rknpu_dev->iommu_shared_mm_lock);
+	if (READ_ONCE(rknpu_dev->shutting_down) ||
+	    rknpu_dev->iommu_domain_fd_users[domain_id] ||
+	    rknpu_dev->iommu_domain_live_objs[domain_id] ||
+	    (rknpu_dev->iommu_pools[domain_id].ready &&
+	     !drm_mm_clean(&rknpu_dev->iommu_pools[domain_id].mm)))
+		goto out;
+
+	for (core = 0; core < RKNPU_MAX_CORES; core++) {
+		if (rknpu_dev->iommu_active_domain[core] == domain_id &&
+		    (rknpu_dev->iommu_active_refcount[core] ||
+		     !rknpu_dev->cores[core].group))
+			goto out;
+	}
+	for (core = 0; core < RKNPU_MAX_CORES; core++) {
+		struct iommu_domain *domain =
+			rknpu_dev->iommu_domains[core][domain_id];
+
+		if (!domain)
+			continue;
+		if (rknpu_dev->iommu_active_domain[core] == domain_id) {
+			iommu_detach_group(domain, rknpu_dev->cores[core].group);
+			rknpu_dev->iommu_active_domain[core] = -1;
+		}
+		iommu_domain_free(domain);
+		rknpu_dev->iommu_domains[core][domain_id] = NULL;
+		rknpu_dev->iommu_domain_reclaims[domain_id]++;
+	}
+out:
+	mutex_unlock(&rknpu_dev->iommu_shared_mm_lock);
+	mutex_unlock(&rknpu_dev->iommu_domain_lock);
+}
+
 void rknpu_iommu_detach_core(struct rknpu_device *rknpu_dev,
 			     unsigned int core_index)
 {
@@ -468,6 +513,7 @@ void rknpu_iommu_release_iova(struct rknpu_device *rknpu_dev, int domain_id,
 	mutex_unlock(&rknpu_dev->iommu_shared_mm_lock);
 
 	memset(node, 0, sizeof(*node));
+	rknpu_iommu_reclaim_domain(rknpu_dev, domain_id);
 }
 
 int rknpu_iommu_map_core_sg(struct rknpu_device *rknpu_dev,
@@ -585,13 +631,6 @@ int rknpu_iommu_domain_attach(struct rknpu_device *rknpu_dev,
 	}
 
 	mutex_lock(&rknpu_dev->iommu_domain_lock);
-	domain = rknpu_iommu_ensure_domain(rknpu_dev, core_index, domain_id);
-	if (IS_ERR(domain)) {
-		ret = PTR_ERR(domain);
-		mutex_unlock(&rknpu_dev->iommu_domain_lock);
-		return ret;
-	}
-
 	active = rknpu_dev->iommu_active_domain[core_index];
 	while (active != domain_id && rknpu_dev->iommu_active_refcount[core_index] > 0) {
 		int wait_ret;
@@ -614,6 +653,14 @@ int rknpu_iommu_domain_attach(struct rknpu_device *rknpu_dev,
 
 		mutex_lock(&rknpu_dev->iommu_domain_lock);
 		active = rknpu_dev->iommu_active_domain[core_index];
+	}
+
+	/* Waiting drops the lock; look up the target only after the wait. */
+	domain = rknpu_iommu_ensure_domain(rknpu_dev, core_index, domain_id);
+	if (IS_ERR(domain)) {
+		ret = PTR_ERR(domain);
+		mutex_unlock(&rknpu_dev->iommu_domain_lock);
+		return ret;
 	}
 
 	if (active == domain_id) {
@@ -652,10 +699,13 @@ void rknpu_iommu_domain_detach(struct rknpu_device *rknpu_dev,
 			       unsigned int core_index,
 			       struct rknpu_iommu_domain_ref *ref)
 {
+	int domain_id;
+
 	if (!rknpu_dev || !ref || !ref->domain || core_index >= RKNPU_MAX_CORES)
 		return;
 
 	mutex_lock(&rknpu_dev->iommu_domain_lock);
+	domain_id = rknpu_dev->iommu_active_domain[core_index];
 	/*
 	 * Drop domain refcount under lock. The group remains sticky-attached
 	 * to allow fast reuse by the next job with the same domain ID.
@@ -668,4 +718,5 @@ void rknpu_iommu_domain_detach(struct rknpu_device *rknpu_dev,
 		wake_up(&rknpu_dev->iommu_active_wq[core_index]);
 	}
 	mutex_unlock(&rknpu_dev->iommu_domain_lock);
+	rknpu_iommu_reclaim_domain(rknpu_dev, domain_id);
 }

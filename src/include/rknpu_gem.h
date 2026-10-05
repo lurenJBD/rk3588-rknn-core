@@ -188,9 +188,6 @@ vm_fault_t rknpu_gem_fault(struct vm_fault *vmf);
 
 int rknpu_gem_mmap_obj(struct drm_gem_object *obj, struct vm_area_struct *vma);
 
-/* set vm_flags and we can change the vm attribute to other one at here. */
-int rknpu_gem_mmap(struct file *filp, struct vm_area_struct *vma);
-
 /* low-level interface prime helpers */
 struct drm_gem_object *rknpu_gem_prime_import(struct drm_device *dev,
 					      struct dma_buf *dma_buf);
@@ -201,8 +198,6 @@ rknpu_gem_prime_import_sg_table(struct drm_device *dev,
 				struct sg_table *sgt);
 int rknpu_gem_prime_vmap(struct drm_gem_object *obj, struct iosys_map *map);
 void rknpu_gem_prime_vunmap(struct drm_gem_object *obj, struct iosys_map *map);
-int rknpu_gem_prime_mmap(struct drm_gem_object *obj,
-			 struct vm_area_struct *vma);
 
 int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 			 struct drm_file *file_priv);

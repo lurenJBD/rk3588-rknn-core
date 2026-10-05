@@ -264,6 +264,9 @@ struct rknpu_device {
 	u64 iommu_domain_live_bytes[RKNPU_MAX_IOMMU_DOMAIN_NUM];
 	u64 iommu_domain_peak_bytes[RKNPU_MAX_IOMMU_DOMAIN_NUM];
 	u64 iommu_domain_live_objs[RKNPU_MAX_IOMMU_DOMAIN_NUM];
+	/* Per-FD domain owners and frees, protected by iommu_domain_lock. */
+	unsigned int iommu_domain_fd_users[RKNPU_MAX_IOMMU_DOMAIN_NUM];
+	u64 iommu_domain_reclaims[RKNPU_MAX_IOMMU_DOMAIN_NUM];
 	struct mutex iommu_domain_lock;
 	struct reset_control **srsts;
 	int num_srsts;

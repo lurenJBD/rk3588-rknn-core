@@ -497,6 +497,11 @@ static int rknpu_open(struct drm_device *dev, struct drm_file *file_priv)
 		}
 	}
 
+	if (domain_id >= RKNPU_PER_FD_DOMAIN_START) {
+		mutex_lock(&rknpu_dev->iommu_domain_lock);
+		rknpu_dev->iommu_domain_fd_users[domain_id]++;
+		mutex_unlock(&rknpu_dev->iommu_domain_lock);
+	}
 	fpriv->domain_id = domain_id;
 	file_priv->driver_priv = fpriv;
 
@@ -510,6 +515,11 @@ static void rknpu_postclose(struct drm_device *dev, struct drm_file *file_priv)
 
 	if (fpriv) {
 		if (fpriv->domain_id >= RKNPU_PER_FD_DOMAIN_START) {
+			mutex_lock(&rknpu_dev->iommu_domain_lock);
+			if (rknpu_dev->iommu_domain_fd_users[fpriv->domain_id])
+				rknpu_dev->iommu_domain_fd_users[fpriv->domain_id]--;
+			mutex_unlock(&rknpu_dev->iommu_domain_lock);
+			rknpu_iommu_reclaim_domain(rknpu_dev, fpriv->domain_id);
 			ida_free(&rknpu_dev->domain_ida, fpriv->domain_id);
 			LOG_DEV_DBG(dev->dev,
 				    "client closed, released domain %d\n",
