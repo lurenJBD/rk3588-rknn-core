@@ -30,8 +30,6 @@
 #include "rknpu_gem.h"
 #include "rknpu_iommu.h"
 
-#define RKNPU_GEM_ALLOC_FROM_PAGES 1
-
 static bool mem_profile;
 module_param(mem_profile, bool, 0444);
 MODULE_PARM_DESC(mem_profile,
@@ -63,7 +61,6 @@ int rknpu_gem_mem_stats_show(struct seq_file *m, struct rknpu_device *dev)
 	return 0;
 }
 
-#if RKNPU_GEM_ALLOC_FROM_PAGES
 static struct device *
 rknpu_gem_core_dev(struct rknpu_gem_object *rknpu_obj, unsigned int core)
 {
@@ -386,7 +383,6 @@ static void rknpu_gem_put_pages(struct rknpu_gem_object *rknpu_obj)
 
 	rknpu_obj->pages_backed = false;
 }
-#endif
 
 static int rknpu_gem_alloc_buf(struct rknpu_gem_object *rknpu_obj)
 {
@@ -425,9 +421,6 @@ static int rknpu_gem_alloc_buf(struct rknpu_gem_object *rknpu_obj)
 #ifdef DMA_ATTR_NON_CONSISTENT
 		rknpu_obj->dma_attrs |= DMA_ATTR_NON_CONSISTENT;
 #endif
-#ifdef DMA_ATTR_SYS_CACHE_ONLY
-		rknpu_obj->dma_attrs |= DMA_ATTR_SYS_CACHE_ONLY;
-#endif
 	} else if (rknpu_obj->flags & RKNPU_MEM_WRITE_COMBINE) {
 		rknpu_obj->dma_attrs |= DMA_ATTR_WRITE_COMBINE;
 	}
@@ -440,7 +433,6 @@ static int rknpu_gem_alloc_buf(struct rknpu_gem_object *rknpu_obj)
 		rknpu_obj->dma_attrs |= DMA_ATTR_SKIP_ZEROING;
 #endif
 
-#if RKNPU_GEM_ALLOC_FROM_PAGES
 	/*
 	 * With an IOMMU, always use one set of pages plus per-core device
 	 * mappings. Otherwise a "contiguous" request would silently allocate
@@ -448,7 +440,6 @@ static int rknpu_gem_alloc_buf(struct rknpu_gem_object *rknpu_obj)
 	 */
 	if (rknpu_dev->iommu_en)
 		return rknpu_gem_get_pages(rknpu_obj);
-#endif
 
 	if (rknpu_obj->flags & RKNPU_MEM_ZEROING)
 		gfp_mask |= __GFP_ZERO;
@@ -565,12 +556,10 @@ static void rknpu_gem_free_buf(struct rknpu_gem_object *rknpu_obj)
 	struct drm_device *drm = rknpu_obj->base.dev;
 	struct device *map_dev = rknpu_gem_target_dev(rknpu_obj);
 
-#if RKNPU_GEM_ALLOC_FROM_PAGES
 	if (rknpu_obj->pages_backed) {
 		rknpu_gem_put_pages(rknpu_obj);
 		return;
 	}
-#endif
 
 	if (!rknpu_obj->dma_allocated) {
 		LOG_DEBUG("DMA buffer is not allocated.\n");
@@ -1117,7 +1106,6 @@ int rknpu_gem_destroy_ioctl(struct drm_device *drm, void *data,
 	return rknpu_gem_handle_destroy(file_priv, args->handle);
 }
 
-#if RKNPU_GEM_ALLOC_FROM_PAGES
 /*
  * __vm_map_pages - maps range of kernel pages into user vma
  * @vma: user vma to map to
@@ -1170,7 +1158,6 @@ static int rknpu_gem_mmap_pages(struct rknpu_gem_object *rknpu_obj,
 
 	return ret;
 }
-#endif
 
 static int rknpu_gem_mmap_buffer(struct rknpu_gem_object *rknpu_obj,
 				 struct vm_area_struct *vma)
@@ -1194,10 +1181,8 @@ static int rknpu_gem_mmap_buffer(struct rknpu_gem_object *rknpu_obj,
 	if (vm_size > rknpu_obj->size)
 		return -EINVAL;
 
-#if RKNPU_GEM_ALLOC_FROM_PAGES
 	if (rknpu_obj->pages_backed)
 		return rknpu_gem_mmap_pages(rknpu_obj, vma);
-#endif
 
 	ret = dma_mmap_attrs(drm->dev, vma, rknpu_obj->cookie,
 			     rknpu_obj->dma_addr, rknpu_obj->size,
