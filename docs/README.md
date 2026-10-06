@@ -10,6 +10,7 @@ first-time users lives here.
 | [validation.md](validation.md) | Acceptance test flow and how to reproduce it |
 | [scores.md](scores.md) | Performance scores for the toolkit demos |
 | [ling-3-tiny-rknn.md](ling-3-tiny-rknn.md) | Ling-3.0-tiny W4A8 LLM result |
+| [domain-mmap.md](domain-mmap.md) | Idle per-FD domain reclamation and GEM mmap cleanup |
 | [module-parameters.md](module-parameters.md) | Module parameters and debugfs nodes |
 | [memory-and-dmc.md](memory-and-dmc.md) | Memory bandwidth, mainline DMC facts, and their impact |
 
