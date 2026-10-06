@@ -48,23 +48,24 @@ per-core `load=` samples. The acceptance procedure is in
 
 ## Third-party Flash-Attention benchmark (`rk-llama.cpp`)
 
-`run-rk-llama-bench.sh` drives hardware Flash-Attention acceleration benchmarks via a third-party fork of `llama.cpp` (`rk-llama.cpp`, branch `opi5-rknpu2-embed-opt`):
+`run-rk-llama-bench.sh` drives end-to-end embedding benchmarks on `jina-embeddings-v5-small` (`v5-small-retrieval-Q8_0.gguf`, Qwen3-0.6B architecture) via a third-party fork of `llama.cpp` (`rk-llama.cpp`, branch `opi5-rknpu2-embed-opt`):
 <https://github.com/pty819/rk-llama.cpp/tree/opi5-rknpu2-embed-opt>
 
-This workload evaluates NPU tensor matrix multiplication (`rknn_matmul_api`) on synthetic Qwen3-0.6B dimensions ($D=128, H=16, H_{kv}=8$) comparing adaptive tile scheduling against fixed baseline tiles.
+The benchmark evaluates NPU hardware Flash-Attention acceleration (`rknn_matmul_api`) comparing `RKNPU_FA=1` (NPU Flash-Attention) against `RKNPU_FA=0` (CPU Flash-Attention) across token lengths 53 to 2048, and verifies 1024-dimensional embedding cosine similarity ($\ge 0.996$).
 
-Because it is third-party material, it is not staged by `prepare-test-assets.sh`. Clone it manually into `assets/rk-llama.cpp`:
+Because it is third-party material, it is not staged by `prepare-test-assets.sh`. Clone the repository manually into `assets/rk-llama.cpp`:
 
 ```sh
 git clone -b opi5-rknpu2-embed-opt https://github.com/pty819/rk-llama.cpp assets/rk-llama.cpp
 ```
 
-Then run the benchmark (binaries are built automatically on first run):
+Then run the benchmark (the model `v5-small-retrieval-Q8_0.gguf` and benchmark binaries are automatically prepared on first run):
 
 ```sh
-./run-rk-llama-bench.sh --compare   # compare adaptive vs baseline tiles across token lengths
-./run-rk-llama-bench.sh --quick     # quick run on N=53 tokens
-./run-rk-llama-bench.sh --devices   # list detected NPU devices
+./run-rk-llama-bench.sh --compare      # end-to-end model benchmark across token lengths 53..2048
+./run-rk-llama-bench.sh --quick        # quick run on N=53 tokens
+./run-rk-llama-bench.sh --microbench   # standalone kernel adaptive tile microbenchmark
+./run-rk-llama-bench.sh --devices      # list detected NPU devices
 ```
 
 Full benchmark scores, token scaling tables and verification details are documented in [`../docs/rk-llama-rknpu2-fa.md`](../docs/rk-llama-rknpu2-fa.md).

@@ -11,7 +11,7 @@ first-time users lives here.
 | [scores.md](scores.md) | Performance scores for the toolkit demos |
 | [ling-3-tiny-rknn.md](ling-3-tiny-rknn.md) | Ling-3.0-tiny W4A8 LLM result |
 | [domain-mmap.md](domain-mmap.md) | Idle per-FD domain reclamation and GEM mmap cleanup |
-| [rk-llama-rknpu2-fa.md](rk-llama-rknpu2-fa.md) | rk-llama.cpp Flash-Attention (Qwen3-0.6B) benchmark results |
+| [rk-llama-rknpu2-fa.md](rk-llama-rknpu2-fa.md) | rk-llama.cpp jina-embeddings-v5-small (Q8_0) benchmark results |
 | [module-parameters.md](module-parameters.md) | Module parameters and debugfs nodes |
 | [memory-and-dmc.md](memory-and-dmc.md) | Memory bandwidth, mainline DMC facts, and their impact |
 
