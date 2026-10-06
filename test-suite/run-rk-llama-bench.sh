@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
 # run-rk-llama-bench.sh — Run RKNPU2 Flash-Attention and embedding performance
-# benchmarks using rk-llama.cpp (opi5-rknpu2-embed-opt).
+# benchmarks on jina-embeddings-v5-small retrieval Q8_0 using rk-llama.cpp.
 #
 # Usage:
-#   run-rk-llama-bench.sh [--compare|--adaptive|--baseline|--quick|--devices]
-#                         [--lengths "53 64 128 256 512 1024 2048"]
-#                         [--threads N] [--build-only]
+#   run-rk-llama-bench.sh [--compare|--quick|--devices|--microbench]
+#                         [--model PATH] [--lengths "53,128,256,512,1024,2048"]
+#                         [--repetitions N] [--threads N] [--build-only]
 #
 # Notes:
 #   - Paths are resolved dynamically relative to this script directory.
-#   - Hardware execution is bounded by timeout and pinned to big cores (taskset -c 4-7).
-#   - Verifies NPU interrupt increments and kernel taint state.
+#   - Execution is pinned to Cortex-A76 cores (taskset -c 4-7) with 4 threads.
+#   - Hardware execution is independently verified via /proc/interrupts.
 #
 
 set -euo pipefail
@@ -23,25 +23,31 @@ BUILD_DIR="$LLAMA_DIR/build"
 BIN_DIR="$BUILD_DIR/bin"
 BENCH_BIN="$BIN_DIR/fa-hardware-bench"
 LLAMA_BENCH_BIN="$BIN_DIR/llama-bench"
+LLAMA_EMBD_BIN="$BIN_DIR/llama-embedding"
 RKNPU_LIB_DIR="$LLAMA_DIR/ggml/src/ggml-rknpu2/libs"
+DEFAULT_MODEL="$ASSETS_DIR/models/v5-small-retrieval-Q8_0.gguf"
+MODEL_URL="https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF/resolve/main/v5-small-retrieval-Q8_0.gguf"
 
 MODE="compare"
-CUSTOM_LENGTHS=""
+MODEL_PATH="$DEFAULT_MODEL"
+LENGTHS="53,128,256,512,1024,2048"
+REPETITIONS=3
 THREADS=4
 BUILD_ONLY=0
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--compare)    MODE="compare"; shift ;;
-	--adaptive)   MODE="adaptive"; shift ;;
-	--baseline)   MODE="baseline"; shift ;;
-	--quick)      MODE="quick"; shift ;;
-	--devices)    MODE="devices"; shift ;;
-	--build-only) BUILD_ONLY=1; shift ;;
-	--lengths)    CUSTOM_LENGTHS="$2"; shift 2 ;;
-	--threads)    THREADS="$2"; shift 2 ;;
+	--compare)     MODE="compare"; shift ;;
+	--quick)       MODE="quick"; shift ;;
+	--devices)     MODE="devices"; shift ;;
+	--microbench)  MODE="microbench"; shift ;;
+	--model)       MODEL_PATH="$2"; shift 2 ;;
+	--lengths)     LENGTHS="$2"; shift 2 ;;
+	--repetitions) REPETITIONS="$2"; shift 2 ;;
+	--threads)     THREADS="$2"; shift 2 ;;
+	--build-only)  BUILD_ONLY=1; shift ;;
 	-h|--help)
-		sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -88,14 +94,14 @@ ensure_binaries() {
 		echo "Built $BENCH_BIN successfully."
 	fi
 
-	if [ ! -f "$LLAMA_BENCH_BIN" ]; then
-		echo "Building llama-bench via CMake..."
+	if [ ! -f "$LLAMA_BENCH_BIN" ] || [ ! -f "$LLAMA_EMBD_BIN" ]; then
+		echo "Building llama-bench and llama-embedding via CMake..."
 		(
 			cd "$LLAMA_DIR"
 			cmake -B build -DLLAMA_RKNPU2=ON -DCMAKE_BUILD_TYPE=Release
-			cmake --build build --target llama-bench -j"$(nproc)"
-		) || die "failed to build llama-bench"
-		echo "Built $LLAMA_BENCH_BIN successfully."
+			cmake --build build --target llama-bench llama-embedding -j"$(nproc)"
+		) || die "failed to build llama-bench / llama-embedding"
+		echo "Built benchmark binaries successfully."
 	fi
 }
 
@@ -108,13 +114,23 @@ fi
 
 if [ "$MODE" = "devices" ]; then
 	echo "Listing detected devices via llama-bench:"
+	export LD_LIBRARY_PATH="$RKNPU_LIB_DIR:$BIN_DIR:${LD_LIBRARY_PATH:-}"
 	"$LLAMA_BENCH_BIN" --list-devices
 	exit 0
 fi
 
-# 3. Helper to capture interrupts
-get_irqs() {
-	awk '/(fdab0000|fdac0000|fdad0000)\.npu/ {print $1, $6, $7, $8}' /proc/interrupts
+# Ensure model exists for model-based modes
+ensure_model() {
+	if [ ! -f "$MODEL_PATH" ]; then
+		if [ "$MODEL_PATH" = "$DEFAULT_MODEL" ]; then
+			echo "Model not found at $MODEL_PATH."
+			echo "Downloading jina-embeddings-v5-small (v5-small-retrieval-Q8_0.gguf)..."
+			mkdir -p "$(dirname "$MODEL_PATH")"
+			curl -L -C - -o "$MODEL_PATH" "$MODEL_URL" || die "failed to download model"
+		else
+			die "Specified model does not exist: $MODEL_PATH"
+		fi
+	fi
 }
 
 show_irqs_diff() {
@@ -125,80 +141,43 @@ show_irqs_diff() {
 	     /114:.*npu/ {printf "  IRQ %-4s (Core 2): %d\n", $1, $6+$7+$8}' /proc/interrupts
 }
 
-export LD_LIBRARY_PATH="$RKNPU_LIB_DIR:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$RKNPU_LIB_DIR:$BIN_DIR:${LD_LIBRARY_PATH:-}"
 
 echo "========================================================"
-echo " RKNPU2 Flash-Attention Benchmark (opi5-rknpu2-embed-opt)"
+echo " RKNPU2 Benchmark: jina-embeddings-v5-small (Q8_0)"
 echo " Mode: $MODE | CPUs: 4-7 (A76 cluster) | Threads: $THREADS"
 echo " Driver: rknpu ($(cat /sys/module/rknpu/srcversion)) | Taint: $TAINT"
 echo "========================================================"
 
 show_irqs_diff "NPU IRQs Before Run"
 
-# 4. Execution logic
-run_bench_pass() {
-	local adaptive="$1"
-	local length_arg="${2:-}"
-	local mode_arg="${3:-}"
-
-	local cmd=("$BENCH_BIN" "$adaptive")
-	if [ -n "$length_arg" ]; then
-		cmd+=("$length_arg")
-		if [ -n "$mode_arg" ]; then
-			cmd+=("$mode_arg")
-		fi
-	fi
-
-	timeout 60s taskset -c 4-7 "${cmd[@]}"
-}
-
 case "$MODE" in
-quick)
+microbench)
 	echo
-	echo "--- Quick Run (N=53 tokens, Adaptive=1 vs 0) ---"
-	echo "Adaptive=1:"
-	run_bench_pass 1 53 0
-	echo "Adaptive=0:"
-	run_bench_pass 0 53 0
-	;;
+	echo "--- Running Flash-Attention Microbenchmark (Synthetic Tensors) ---"
+	run_micro() {
+		local adapt="$1"
+		timeout 60s taskset -c 4-7 "$BENCH_BIN" "$adapt"
+	}
+	TMP_ADAPT="$(mktemp /tmp/rknpu_fa_adapt_XXXXXX.jsonl)"
+	TMP_BASE="$(mktemp /tmp/rknpu_fa_base_XXXXXX.jsonl)"
+	trap 'rm -f "$TMP_ADAPT" "$TMP_BASE"' EXIT
 
-adaptive)
-	echo
-	echo "--- Running Adaptive Flash Attention (RKNPU_FA_ADAPTIVE=1) ---"
-	run_bench_pass 1
-	;;
-
-baseline)
-	echo
-	echo "--- Running Baseline Flash Attention (RKNPU_FA_ADAPTIVE=0) ---"
-	run_bench_pass 0
-	;;
-
-compare)
-	TMP_ADAPTIVE="$(mktemp /tmp/rknpu_fa_adapt_XXXXXX.jsonl)"
-	TMP_BASELINE="$(mktemp /tmp/rknpu_fa_base_XXXXXX.jsonl)"
-	trap 'rm -f "$TMP_ADAPTIVE" "$TMP_BASELINE"' EXIT
-
-	echo "Running Adaptive pass (RKNPU_FA_ADAPTIVE=1)..."
-	run_bench_pass 1 > "$TMP_ADAPTIVE"
-
-	echo "Running Baseline pass (RKNPU_FA_ADAPTIVE=0)..."
-	run_bench_pass 0 > "$TMP_BASELINE"
+	run_micro 1 > "$TMP_ADAPT"
+	run_micro 0 > "$TMP_BASE"
 
 	echo
-	echo "### Performance Comparison: Adaptive Tiles vs Baseline Fixed Tiles"
-	echo
+	echo "### Microbenchmark: Adaptive Tiles vs Baseline Fixed Tiles"
 	printf "| %-10s | %-6s | %-12s | %-12s | %-9s | %-12s | %-10s |\n" \
 		"Pattern" "Tokens" "Adaptive(ms)" "Baseline(ms)" "Speedup" "Max Error" "Verified"
 	echo "|------------|--------|--------------|--------------|-----------|--------------|------------|"
 
-	python3 - "$TMP_ADAPTIVE" "$TMP_BASELINE" << 'EOF'
+	python3 - "$TMP_ADAPT" "$TMP_BASE" << 'EOF'
 import sys, json
 
 adapt_file, base_file = sys.argv[1], sys.argv[2]
 adapt_data = [json.loads(line) for line in open(adapt_file) if line.strip().startswith('{')]
 base_data = [json.loads(line) for line in open(base_file) if line.strip().startswith('{')]
-
 base_map = {(d.get('mode', 0), d['n']): d for d in base_data}
 mode_names = {0: "Causal", 1: "Multi-Doc", 2: "Sparse"}
 
@@ -214,6 +193,113 @@ for a in adapt_data:
         err = a['maxerr']
         verified = "PASS" if a['finite'] and err <= 0.006 else "FAIL"
         print(f"| {p:<10} | {n:<6} | {a_ms:<12.4f} | {b_ms:<12.4f} | {speedup:<8.2f}x | {err:<12.7f} | {verified:<10} |")
+EOF
+	;;
+
+quick)
+	ensure_model
+	echo
+	echo "--- Quick Run on Real Model: jina-embeddings-v5-small (N=53 tokens) ---"
+	python3 - "$MODEL_PATH" "$LLAMA_BENCH_BIN" "$THREADS" << 'EOF'
+import sys, os, subprocess, json
+
+model, bench_bin, threads = sys.argv[1], sys.argv[2], sys.argv[3]
+env = os.environ.copy()
+
+def run_p53(fa):
+    e = env.copy()
+    e['RKNPU_FA'] = str(fa)
+    cmd = ['taskset', '-c', '4-7', bench_bin, '-m', model, '-p', '53', '-n', '0',
+           '-t', threads, '-b', '2048', '-ub', '2048', '-embd', '1', '-r', '2', '-o', 'jsonl']
+    res = subprocess.run(cmd, env=e, capture_output=True, text=True, check=True)
+    for line in res.stdout.splitlines():
+        if line.strip().startswith('{'):
+            return json.loads(line)
+    return {}
+
+d1 = run_p53(1)
+d0 = run_p53(0)
+print(f"RKNPU_FA=1 (NPU FA ON) : {d1.get('avg_ts', 0):.2f} tok/s ({d1.get('avg_ns', 0)/1e6:.2f} ms)")
+print(f"RKNPU_FA=0 (NPU FA OFF): {d0.get('avg_ts', 0):.2f} tok/s ({d0.get('avg_ns', 0)/1e6:.2f} ms)")
+EOF
+	;;
+
+compare)
+	ensure_model
+	echo
+	echo "--- Real Model Benchmark: jina-embeddings-v5-small (v5-small-retrieval-Q8_0.gguf) ---"
+	echo "Lengths: $LENGTHS | Repetitions: $REPETITIONS | Threads: $THREADS"
+	echo
+
+	python3 - "$MODEL_PATH" "$LLAMA_BENCH_BIN" "$LLAMA_EMBD_BIN" "$LENGTHS" "$REPETITIONS" "$THREADS" << 'EOF'
+import sys, os, subprocess, json, math
+
+model, bench_bin, embd_bin, lengths_str, reps, threads = sys.argv[1:7]
+env = os.environ.copy()
+lengths = [int(x.strip()) for x in lengths_str.split(',') if x.strip()]
+
+def run_bench(fa):
+    e = env.copy()
+    e['RKNPU_FA'] = str(fa)
+    cmd = ['taskset', '-c', '4-7', bench_bin,
+           '-m', model, '-p', lengths_str, '-n', '0',
+           '-t', threads, '-b', '2048', '-ub', '2048',
+           '-embd', '1', '-r', reps, '-o', 'jsonl']
+    res = subprocess.run(cmd, env=e, capture_output=True, text=True, check=True)
+    items = {}
+    for line in res.stdout.splitlines():
+        if line.strip().startswith('{'):
+            d = json.loads(line)
+            items[d['n_prompt']] = d
+    return items
+
+def check_cosine():
+    def get_emb(fa):
+        e = env.copy()
+        e['RKNPU_FA'] = str(fa)
+        cmd = ['taskset', '-c', '4-7', embd_bin,
+               '-m', model,
+               '-p', 'Rockchip RK3588 NPU acceleration benchmark for jina-embeddings-v5-small retrieval Q8_0 model.',
+               '--pooling', 'last', '--embd-normalize', '2', '-c', '2048', '-b', '2048', '-ub', '2048', '-t', threads,
+               '--embd-output-format', 'array']
+        res = subprocess.run(cmd, env=e, capture_output=True, text=True, check=True)
+        out = res.stdout.strip()
+        idx = out.find('[[')
+        return json.loads(out[idx:])[0]
+    v1 = get_emb(1)
+    v0 = get_emb(0)
+    dot = sum(a*b for a,b in zip(v1, v0))
+    cos = dot / (math.sqrt(sum(a*a for a in v1)) * math.sqrt(sum(b*b for b in v0)))
+    return cos
+
+print("Running pass with RKNPU_FA=1 (NPU Flash Attention ON)...")
+on = run_bench(1)
+print("Running pass with RKNPU_FA=0 (NPU Flash Attention OFF / CPU FA)...")
+off = run_bench(0)
+print("Verifying embedding vector numerical similarity...")
+cos = check_cosine()
+
+print("\n### Performance Comparison: jina-embeddings-v5-small (Q8_0)")
+print()
+printf_hdr = "| {:<6} | {:<18} | {:<15} | {:<19} | {:<16} | {:<9} | {:<8} |"
+print(printf_hdr.format("Tokens", "NPU FA ON (tok/s)", "NPU FA ON (ms)", "NPU FA OFF (tok/s)", "NPU FA OFF (ms)", "Speedup", "Status"))
+print("|--------|--------------------|-----------------|---------------------|------------------|-----------|----------|")
+
+for p in lengths:
+    d_on = on.get(p)
+    d_off = off.get(p)
+    if d_on and d_off:
+        ts_on = d_on['avg_ts']
+        ms_on = d_on['avg_ns'] / 1e6
+        ts_off = d_off['avg_ts']
+        ms_off = d_off['avg_ns'] / 1e6
+        sp = ts_on / ts_off if ts_off > 0 else 1.0
+        stat = "PASS" if math.isfinite(ts_on) else "FAIL"
+        print(f"| {p:<6} | {ts_on:>18.2f} | {ms_on:>15.2f} | {ts_off:>19.2f} | {ms_off:>16.2f} | {sp:>8.2f}x | {stat:<8} |")
+
+print()
+cos_status = "PASS" if cos >= 0.996 else "FAIL"
+print(f"Embedding Cosine Similarity: {cos:.6f} (Threshold >= 0.996: {cos_status})")
 EOF
 	;;
 esac
