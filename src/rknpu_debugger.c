@@ -413,15 +413,7 @@ static int rknpu_volt_show(struct seq_file *m, void *data)
 
 static int rknpu_reset_show(struct seq_file *m, void *data)
 {
-	struct rknpu_debugger_node *node = m->private;
-	struct rknpu_debugger *debugger = node->debugger;
-	struct rknpu_device *rknpu_dev =
-		container_of(debugger, struct rknpu_device, debugger);
-
-	if (!rknpu_dev->bypass_soft_reset)
-		seq_puts(m, "on\n");
-	else
-		seq_puts(m, "off\n");
+	seq_puts(m, "write '1' to trigger soft reset\n");
 
 	return 0;
 }
@@ -442,15 +434,14 @@ static ssize_t rknpu_reset_set(struct file *file, const char __user *ubuf,
 		return -EFAULT;
 	buf[len - 1] = '\0';
 
-	if (strcmp(buf, "1") == 0 &&
-	    atomic_read(&rknpu_dev->power_refcount) > 0)
+	if (strcmp(buf, "1") == 0) {
+		if (atomic_read(&rknpu_dev->power_refcount) <= 0)
+			return -EPERM;
 		rknpu_soft_reset(rknpu_dev);
-	else if (strcmp(buf, "on") == 0)
-		rknpu_dev->bypass_soft_reset = 0;
-	else if (strcmp(buf, "off") == 0)
-		rknpu_dev->bypass_soft_reset = 1;
+		return len;
+	}
 
-	return len;
+	return -EINVAL;
 }
 
 static int rknpu_mem_stats_show(struct seq_file *m, void *data)

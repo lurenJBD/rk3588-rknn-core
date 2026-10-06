@@ -92,11 +92,6 @@ int rknpu_reset_begin(struct rknpu_device *rknpu_dev)
 {
 	unsigned long flags;
 
-	if (rknpu_dev->bypass_soft_reset) {
-		LOG_WARN("bypass soft reset\n");
-		return -EOPNOTSUPP;
-	}
-
 	mutex_lock(&rknpu_dev->reset_lock);
 	if (READ_ONCE(rknpu_dev->reset_failed)) {
 		mutex_unlock(&rknpu_dev->reset_lock);

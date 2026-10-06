@@ -285,7 +285,6 @@ struct rknpu_device {
 	struct rockchip_opp_info opp_info;
 	unsigned long current_freq;
 	unsigned long current_volt;
-	int bypass_soft_reset;
 	bool soft_reseting;
 	atomic_t power_refcount;
 	atomic_t cmdline_power_refcount;

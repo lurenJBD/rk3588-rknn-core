@@ -57,12 +57,6 @@
 
 #define POWER_DOWN_FREQ 200000000
 
-
-static int bypass_soft_reset;
-module_param(bypass_soft_reset, int, 0644);
-MODULE_PARM_DESC(bypass_soft_reset,
-		 "bypass RKNPU soft reset if set it to 1, disabled by default");
-
 bool rknpu_debug_log;
 module_param(rknpu_debug_log, bool, 0644);
 MODULE_PARM_DESC(rknpu_debug_log,
@@ -909,7 +903,6 @@ static int rknpu_probe(struct platform_device *pdev)
 
 		rknpu_dev->config = config;
 		/* The facade owner is created lazily as a module root device. */
-		rknpu_dev->bypass_soft_reset = bypass_soft_reset;
 
 		spin_lock_init(&rknpu_dev->lock);
 		spin_lock_init(&rknpu_dev->irq_lock);
