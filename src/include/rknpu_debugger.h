@@ -21,12 +21,6 @@ struct rknpu_debugger {
 	struct dentry *debugfs_dir;
 	struct list_head debugfs_entry_list;
 	struct mutex debugfs_lock;
-#ifdef CONFIG_ROCKCHIP_RKNPU_PROC_FS
-	/* Directory of procfs file */
-	struct proc_dir_entry *procfs_dir;
-	struct list_head procfs_entry_list;
-	struct mutex procfs_lock;
-#endif
 };
 
 /*
@@ -67,12 +61,8 @@ struct rknpu_debugger_node {
 	/* template for this node. */
 	const struct rknpu_debugger_list *info_ent;
 
-	/* Each Procfs/Debugfs file. */
+	/* Each Debugfs file. */
 	struct dentry *dent;
-
-#ifdef CONFIG_ROCKCHIP_RKNPU_PROC_FS
-	struct proc_dir_entry *pent;
-#endif
 
 	struct list_head list;
 };
