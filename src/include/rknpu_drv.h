@@ -281,7 +281,6 @@ struct rknpu_device {
 	ktime_t devfreq_last_busy[RKNPU_MAX_CORES];
 	unsigned long current_freq;
 	unsigned long current_volt;
-	int bypass_soft_reset;
 	bool soft_reseting;
 	atomic_t power_refcount;
 	atomic_t cmdline_power_refcount;
