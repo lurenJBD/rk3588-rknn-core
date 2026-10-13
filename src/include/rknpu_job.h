@@ -60,11 +60,6 @@ static inline bool rknpu_task_range_is_valid(size_t object_size,
 	       task_number <= task_capacity - task_start;
 }
 
-static inline bool rknpu_task_token_is_valid(u64 token)
-{
-	return token && token <= U32_MAX;
-}
-
 struct rknpu_job {
 	struct rknpu_device *rknpu_dev;
 	struct list_head head[RKNPU_MAX_CORES];
@@ -81,7 +76,6 @@ struct rknpu_job {
 	struct rknpu_iommu_domain_ref iommu_ref[RKNPU_MAX_CORES];
 	bool power_held;
 	struct rknpu_gem_object *task_obj;
-	struct rknpu_task *first_task;
 	struct rknpu_task *last_task;
 	uint32_t int_mask[RKNPU_MAX_CORES];
 	uint32_t int_status[RKNPU_MAX_CORES];

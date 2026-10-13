@@ -259,7 +259,6 @@ static void rknpu_job_unpublish(struct rknpu_job *job)
 	if (job->flags & RKNPU_JOB_PUBLISHED) {
 		list_del_init(&job->device_node);
 		job->flags &= ~RKNPU_JOB_PUBLISHED;
-		wake_up_all(&rknpu_dev->commit_wq);
 	}
 	spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
 }
@@ -734,7 +733,6 @@ static inline int rknpu_job_subcore_commit_pc(struct rknpu_job *job,
 		  RKNPU_CORE_REG_PC_TASK_CONTROL);
 	REG_WRITE(0, RKNPU_CORE_REG_PC_DMA_BASE_ADDR);
 
-	job->first_task = first_task;
 	job->last_task = last_task;
 	job->int_mask[core_index] = last_task->int_mask;
 
