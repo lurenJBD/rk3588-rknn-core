@@ -120,7 +120,8 @@ int rknpu_get_total_rw_amount(struct rknpu_device *rknpu_dev, uint32_t *amount);
 /*
  * Core rail voltage in microvolts, or 0 when this device exposes none.
  * See rknpu_get_volt() in rknpu_job.c for why it is not simply
- * regulator_get_voltage(rknpu_dev->vdd) the way vendor's action handler has it.
+ * regulator_get_voltage() on an assumed core supply the way vendor's action
+ * handler has it.
  */
 int rknpu_get_volt(struct rknpu_device *rknpu_dev, uint32_t *value);
 

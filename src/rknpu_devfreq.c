@@ -22,10 +22,12 @@
 #include "rknpu_devfreq.h"
 
 #define RKNPU_FREQ_MIN 200000000UL /* 200 MHz - boot default / idle rate */
-#define RKNPU_FREQ_MAX 800000000UL  /* 800 MHz - safe hardware limit on mainline */
-#define RKNPU_FREQ_1GHZ 1000000000UL /* 1 GHz - reserved, pending GRF read margin */
+/* Safe default ceiling; overclocking raises this and the module parameter. */
+#define RKNPU_FREQ_MAX 800000000UL
+/* Overclocking target reserved for boards with validated GRF read margin. */
+#define RKNPU_FREQ_1GHZ 1000000000UL
 #define RKNPU_BASELINE_VOLT 800000 /* 800 mV (0.80 V) - board boot default */
-#define RKNPU_HIGH_FREQ_VOLT 850000 /* 850 mV (0.85 V) - reserved for 1 GHz */
+#define RKNPU_HIGH_FREQ_VOLT 850000 /* 850 mV (0.85 V) - overclocking reserve */
 #define RKNPU_MAX_VOLT 950000 /* 950 mV (0.95 V) - PMIC safe limit */
 
 int rknpu_target_freq_mhz = 800;
@@ -103,9 +105,12 @@ int rknpu_opp_set_freq(struct rknpu_device *rknpu_dev, unsigned long target_freq
 	if (target_freq > RKNPU_FREQ_MAX)
 		target_freq = RKNPU_FREQ_MAX;
 
-	/* Select target operating voltage. */
+	/*
+	 * Select target operating voltage. The >900 MHz branch is reserved for
+	 * overclocking; RKNPU_FREQ_MAX must be raised to reach it.
+	 */
 	if (target_freq > 900000000UL)
-		target_volt = RKNPU_HIGH_FREQ_VOLT; /* 850 mV (reserved) */
+		target_volt = RKNPU_HIGH_FREQ_VOLT; /* 850 mV overclocking */
 	else
 		target_volt = RKNPU_BASELINE_VOLT;  /* 800 mV (safe 200-800 MHz) */
 
