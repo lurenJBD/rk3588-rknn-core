@@ -1858,54 +1858,6 @@ int rknpu_get_hw_version(struct rknpu_device *rknpu_dev, uint32_t *version)
 	return 0;
 }
 
-int rknpu_get_bw_priority(struct rknpu_device *rknpu_dev, uint32_t *priority,
-			  uint32_t *expect, uint32_t *tw)
-{
-	void __iomem *base = rknpu_dev->bw_priority_base;
-
-	if (!base)
-		return -EINVAL;
-
-	spin_lock(&rknpu_dev->lock);
-
-	if (priority != NULL)
-		*priority = _REG_READ(base, 0x0);
-
-	if (expect != NULL)
-		*expect = _REG_READ(base, 0x8);
-
-	if (tw != NULL)
-		*tw = _REG_READ(base, 0xc);
-
-	spin_unlock(&rknpu_dev->lock);
-
-	return 0;
-}
-
-int rknpu_set_bw_priority(struct rknpu_device *rknpu_dev, uint32_t priority,
-			  uint32_t expect, uint32_t tw)
-{
-	void __iomem *base = rknpu_dev->bw_priority_base;
-
-	if (!base)
-		return -EINVAL;
-
-	spin_lock(&rknpu_dev->lock);
-
-	if (priority != 0)
-		_REG_WRITE(base, priority, 0x0);
-
-	if (expect != 0)
-		_REG_WRITE(base, expect, 0x8);
-
-	if (tw != 0)
-		_REG_WRITE(base, tw, 0xc);
-
-	spin_unlock(&rknpu_dev->lock);
-
-	return 0;
-}
-
 int rknpu_clear_rw_amount(struct rknpu_device *rknpu_dev)
 {
 	unsigned int core_index = 0;

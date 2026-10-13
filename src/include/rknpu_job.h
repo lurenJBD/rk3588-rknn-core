@@ -110,12 +110,6 @@ bool rknpu_jobs_idle(struct rknpu_device *rknpu_dev);
 
 int rknpu_get_hw_version(struct rknpu_device *rknpu_dev, uint32_t *version);
 
-int rknpu_get_bw_priority(struct rknpu_device *rknpu_dev, uint32_t *priority,
-			  uint32_t *expect, uint32_t *tw);
-
-int rknpu_set_bw_priority(struct rknpu_device *rknpu_dev, uint32_t priority,
-			  uint32_t expect, uint32_t tw);
-
 int rknpu_clear_rw_amount(struct rknpu_device *rknpu_dev);
 
 int rknpu_get_rw_amount(struct rknpu_device *rknpu_dev, uint32_t *dt_wr,

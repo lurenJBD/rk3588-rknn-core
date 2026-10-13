@@ -19,10 +19,7 @@
 #include <drm/drm_gem.h>
 #include <drm/drm_mode.h>
 
-
-
 #include "rknpu_ioctl.h"
-#include "rknpu_mm.h"
 
 #define to_rknpu_obj(x) container_of(x, struct rknpu_gem_object, base)
 

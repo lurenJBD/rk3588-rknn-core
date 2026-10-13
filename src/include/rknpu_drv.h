@@ -30,7 +30,6 @@
 #include "rknpu_job.h"
 #include "rknpu_fence.h"
 #include "rknpu_debugger.h"
-#include "rknpu_mm.h"
 
 #define DRIVER_NAME "rknpu"
 #define DRIVER_DESC "RKNPU driver"
@@ -84,8 +83,6 @@ extern bool rknpu_debug_log;
 	} while (0)
 
 
-#define RKNPU_CACHE_SG_TABLE_NUM 2
-
 enum rknpu_core_mmio_reg {
 	RKNPU_CORE_REG_VERSION,
 	RKNPU_CORE_REG_VERSION_NUM,
@@ -104,11 +101,6 @@ enum rknpu_core_mmio_reg {
 	RKNPU_CORE_REG_COUNT,
 };
 
-struct rknpu_irqs_data {
-	const char *name;
-	irqreturn_t (*irq_hdl)(int irq, void *ctx);
-};
-
 struct rknpu_amount_data {
 	uint16_t offset_clr_all;
 	uint16_t offset_dt_wr;
@@ -117,15 +109,12 @@ struct rknpu_amount_data {
 };
 
 struct rknpu_config {
-	__u32 bw_priority_addr;
-	__u32 bw_priority_length;
 	__u64 dma_mask;
 	__u32 pc_data_amount_scale;
 	__u32 pc_task_number_bits;
 	__u32 pc_task_number_mask;
 	__u32 pc_task_status_offset;
 	__u32 pc_dma_ctrl;
-	const struct rknpu_irqs_data *irqs;
 	int num_irqs;
 	__u64 nbuf_phyaddr;
 	__u64 nbuf_size;
@@ -134,7 +123,6 @@ struct rknpu_config {
 	const struct rknpu_amount_data *amount_top;
 	const struct rknpu_amount_data *amount_core;
 	void (*state_init)(struct rknpu_device *rknpu_dev);
-	int (*cache_sgt_init)(struct rknpu_device *rknpu_dev);
 };
 
 struct rknpu_timer {
@@ -208,7 +196,6 @@ struct rknpu_device {
 	 */
 	struct xarray gem_dma_xa;
 	atomic64_t mem_stats[RKNPU_MEM_STAT_COUNT];
-	atomic_t sequence;
 	spinlock_t lock;
 	spinlock_t irq_lock;
 	struct mutex power_lock;
@@ -216,13 +203,10 @@ struct rknpu_device {
 	bool reset_failed;
 	bool shutting_down;
 	bool facade_ready;
-	unsigned int commit_count;
-	wait_queue_head_t commit_wq;
 	struct list_head jobs;
 	struct workqueue_struct *job_wq;
 	struct rknpu_subcore_data subcore_datas[RKNPU_MAX_CORES];
 	const struct rknpu_config *config;
-	void __iomem *bw_priority_base;
 	struct rknpu_fence_context *fence_ctx;
 	bool iommu_en;
 	/*
@@ -268,12 +252,6 @@ struct rknpu_device {
 	unsigned int iommu_domain_fd_users[RKNPU_MAX_IOMMU_DOMAIN_NUM];
 	u64 iommu_domain_reclaims[RKNPU_MAX_IOMMU_DOMAIN_NUM];
 	struct mutex iommu_domain_lock;
-	struct reset_control **srsts;
-	int num_srsts;
-	struct clk_bulk_data *clks;
-	int num_clks;
-	struct regulator *vdd;
-	struct regulator *mem;
 	struct devfreq *devfreq;
 	unsigned long ondemand_freq;
 	/* get_dev_status() utilization deltas (wall/busy snapshots). */
@@ -289,32 +267,15 @@ struct rknpu_device {
 	struct rknpu_debugger debugger;
 	struct hrtimer timer;
 	ktime_t kt;
-	phys_addr_t sram_start;
-	phys_addr_t sram_end;
-	phys_addr_t nbuf_start;
-	phys_addr_t nbuf_end;
-	uint32_t sram_size;
-	uint32_t nbuf_size;
-	void __iomem *sram_base_io;
-	void __iomem *nbuf_base_io;
-	struct rknpu_mm *sram_mm;
 	unsigned long power_put_delay;
-	bool reserved_mem_initialized;
 	int iommu_domain_id;
 	struct ida domain_ida;
-	struct sg_table *cache_sgt[RKNPU_CACHE_SG_TABLE_NUM];
 };
 
 struct rknpu_gem_object;
 
 struct rknpu_file_priv {
-	struct drm_file *file_priv;
 	int domain_id;
-};
-
-struct rknpu_session {
-	struct rknpu_device *rknpu_dev;
-	struct list_head list;
 };
 
 u32 rknpu_core_read(struct rknpu_device *rknpu_dev, unsigned int core,

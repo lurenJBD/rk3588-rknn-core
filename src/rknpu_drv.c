@@ -53,7 +53,6 @@
 #include <drm/drm_ioctl.h>
 #include <drm/drm_file.h>
 #include <drm/drm_drv.h>
-#include "rknpu_gem.h"
 
 
 #define POWER_DOWN_FREQ 200000000
@@ -95,21 +94,6 @@ static void rknpu_core_mask_to_string(unsigned int mask, char *buf,
 	}
 }
 
-static const struct rknpu_irqs_data rknpu_irqs[] = {
-	{ "npu_irq", rknpu_core0_irq_handler }
-};
-
-static const struct rknpu_irqs_data rk3576_npu_irqs[] = {
-	{ "npu0_irq", rknpu_core0_irq_handler },
-	{ "npu1_irq", rknpu_core1_irq_handler }
-};
-
-static const struct rknpu_irqs_data rk3588_npu_irqs[] = {
-	{ "npu0_irq", rknpu_core0_irq_handler },
-	{ "npu1_irq", rknpu_core1_irq_handler },
-	{ "npu2_irq", rknpu_core2_irq_handler }
-};
-
 static const struct rknpu_amount_data rknpu_old_top_amount = {
 	.offset_clr_all = 0x8010,
 	.offset_dt_wr = 0x8034,
@@ -143,56 +127,14 @@ static void rk3576_state_init(struct rknpu_device *rknpu_dev)
 	writel(0x1e, rknpu_core_base + 0x1004);
 }
 
-static int rk3576_cache_sgt_init(struct rknpu_device *rknpu_dev)
-{
-	struct sg_table *sgt = NULL;
-	struct scatterlist *sgl = NULL;
-	uint64_t block_size_kb[4] = { 448, 64, 448, 64 };
-	uint64_t block_offset_kb[4] = { 0, 896, 448, 960 };
-	int core_num = rknpu_dev->config->num_irqs;
-	int ret = 0, i = 0, j = 0;
-
-	for (i = 0; i < core_num; i++) {
-		sgt = kzalloc(sizeof(struct sg_table), GFP_KERNEL);
-		if (!sgt)
-			goto out_free_table;
-		ret = sg_alloc_table(sgt, core_num, GFP_KERNEL);
-		if (ret) {
-			kfree(sgt);
-			goto out_free_table;
-		}
-		rknpu_dev->cache_sgt[i] = sgt;
-		for_each_sgtable_sg(sgt, sgl, j) {
-			sg_set_page(sgl, NULL,
-				    block_size_kb[i * core_num + j] * 1024,
-				    block_offset_kb[i * core_num + j] * 1024);
-		}
-	}
-	return 0;
-
-out_free_table:
-	for (i = 0; i < core_num; i++) {
-		if (rknpu_dev->cache_sgt[i]) {
-			sg_free_table(rknpu_dev->cache_sgt[i]);
-			kfree(rknpu_dev->cache_sgt[i]);
-			rknpu_dev->cache_sgt[i] = NULL;
-		}
-	}
-
-	return ret;
-}
-
 static const struct rknpu_config rk356x_rknpu_config = {
-	.bw_priority_addr = 0xfe180008,
-	.bw_priority_length = 0x10,
 	.dma_mask = DMA_BIT_MASK(32),
 	.pc_data_amount_scale = 1,
 	.pc_task_number_bits = 12,
 	.pc_task_number_mask = 0xfff,
 	.pc_task_status_offset = 0x3c,
 	.pc_dma_ctrl = 0,
-	.irqs = rknpu_irqs,
-	.num_irqs = ARRAY_SIZE(rknpu_irqs),
+	.num_irqs = 1,
 	.nbuf_phyaddr = 0,
 	.nbuf_size = 0,
 	.max_submit_number = (1 << 12) - 1,
@@ -200,20 +142,16 @@ static const struct rknpu_config rk356x_rknpu_config = {
 	.amount_top = &rknpu_old_top_amount,
 	.amount_core = NULL,
 	.state_init = NULL,
-	.cache_sgt_init = NULL,
 };
 
 static const struct rknpu_config rk3588_rknpu_config = {
-	.bw_priority_addr = 0x0,
-	.bw_priority_length = 0x0,
 	.dma_mask = DMA_BIT_MASK(40),
 	.pc_data_amount_scale = 2,
 	.pc_task_number_bits = 12,
 	.pc_task_number_mask = 0xfff,
 	.pc_task_status_offset = 0x3c,
 	.pc_dma_ctrl = 0,
-	.irqs = rk3588_npu_irqs,
-	.num_irqs = ARRAY_SIZE(rk3588_npu_irqs),
+	.num_irqs = 3,
 	.nbuf_phyaddr = 0,
 	.nbuf_size = 0,
 	.max_submit_number = (1 << 12) - 1,
@@ -221,20 +159,16 @@ static const struct rknpu_config rk3588_rknpu_config = {
 	.amount_top = NULL,
 	.amount_core = NULL,
 	.state_init = NULL,
-	.cache_sgt_init = NULL,
 };
 
 static const struct rknpu_config rk3576_rknpu_config = {
-	.bw_priority_addr = 0x0,
-	.bw_priority_length = 0x0,
 	.dma_mask = DMA_BIT_MASK(40),
 	.pc_data_amount_scale = 2,
 	.pc_task_number_bits = 16,
 	.pc_task_number_mask = 0xffff,
 	.pc_task_status_offset = 0x48,
 	.pc_dma_ctrl = 1,
-	.irqs = rk3576_npu_irqs,
-	.num_irqs = ARRAY_SIZE(rk3576_npu_irqs),
+	.num_irqs = 2,
 	.nbuf_phyaddr = 0x3fe80000,
 	.nbuf_size = 1024 * 1024,
 	.max_submit_number = (1 << 16) - 1,
@@ -242,7 +176,6 @@ static const struct rknpu_config rk3576_rknpu_config = {
 	.amount_top = &rknpu_top_amount,
 	.amount_core = &rknpu_core_amount,
 	.state_init = rk3576_state_init,
-	.cache_sgt_init = rk3576_cache_sgt_init,
 };
 
 /* driver probe and init */
@@ -334,25 +267,22 @@ static int rknpu_action(struct rknpu_device *rknpu_dev,
 		ret = rknpu_soft_reset(rknpu_dev);
 		break;
 	case RKNPU_GET_BW_PRIORITY:
-		ret = rknpu_get_bw_priority(rknpu_dev, &args->value, NULL,
-					    NULL);
+		ret = -EINVAL;
 		break;
 	case RKNPU_SET_BW_PRIORITY:
-		ret = rknpu_set_bw_priority(rknpu_dev, args->value, 0, 0);
+		ret = -EINVAL;
 		break;
 	case RKNPU_GET_BW_EXPECT:
-		ret = rknpu_get_bw_priority(rknpu_dev, NULL, &args->value,
-					    NULL);
+		ret = -EINVAL;
 		break;
 	case RKNPU_SET_BW_EXPECT:
-		ret = rknpu_set_bw_priority(rknpu_dev, 0, args->value, 0);
+		ret = -EINVAL;
 		break;
 	case RKNPU_GET_BW_TW:
-		ret = rknpu_get_bw_priority(rknpu_dev, NULL, NULL,
-					    &args->value);
+		ret = -EINVAL;
 		break;
 	case RKNPU_SET_BW_TW:
-		ret = rknpu_set_bw_priority(rknpu_dev, 0, 0, args->value);
+		ret = -EINVAL;
 		break;
 	case RKNPU_ACT_CLR_TOTAL_RW_AMOUNT:
 		ret = rknpu_clear_rw_amount(rknpu_dev);
@@ -378,19 +308,11 @@ static int rknpu_action(struct rknpu_device *rknpu_dev,
 		ret = 0;
 		break;
 	case RKNPU_GET_TOTAL_SRAM_SIZE:
-		if (rknpu_dev->sram_mm)
-			args->value = rknpu_dev->sram_mm->total_chunks *
-				      rknpu_dev->sram_mm->chunk_size;
-		else
-			args->value = 0;
+		args->value = 0;
 		ret = 0;
 		break;
 	case RKNPU_GET_FREE_SRAM_SIZE:
-		if (rknpu_dev->sram_mm)
-			args->value = rknpu_dev->sram_mm->free_chunks *
-				      rknpu_dev->sram_mm->chunk_size;
-		else
-			args->value = 0;
+		args->value = 0;
 		ret = 0;
 		break;
 	case RKNPU_GET_IOMMU_DOMAIN_ID:
@@ -473,8 +395,6 @@ static int rknpu_open(struct drm_device *dev, struct drm_file *file_priv)
 	fpriv = kzalloc(sizeof(*fpriv), GFP_KERNEL);
 	if (!fpriv)
 		return -ENOMEM;
-
-	fpriv->file_priv = file_priv;
 
 	if (rknpu_per_fd_domain && rknpu_dev->iommu_en) {
 		domain_id = ida_alloc_range(&rknpu_dev->domain_ida,
@@ -910,7 +830,6 @@ static int rknpu_probe(struct platform_device *pdev)
 		mutex_init(&rknpu_dev->power_lock);
 		mutex_init(&rknpu_dev->reset_lock);
 		INIT_LIST_HEAD(&rknpu_dev->jobs);
-		init_waitqueue_head(&rknpu_dev->commit_wq);
 		for (int i = 0; i < RKNPU_MAX_CORES; i++) {
 			INIT_LIST_HEAD(&rknpu_dev->subcore_datas[i].todo_list);
 			init_waitqueue_head(&rknpu_dev->subcore_datas[i].job_done_wq);
