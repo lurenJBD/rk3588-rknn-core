@@ -46,8 +46,6 @@ struct rknpu_debugger_list {
 	 */
 	ssize_t (*write)(struct file *file, const char __user *ubuf, size_t len,
 			 loff_t *offp);
-	/* Procfs/Debugfs private data. */
-	void *data;
 };
 
 /*

@@ -11,52 +11,6 @@
 #include "rknpu_core.h"
 #include "rknpu_reset.h"
 
-static inline struct reset_control *rknpu_reset_control_get(struct device *dev,
-							    const char *name)
-{
-	struct reset_control *rst = NULL;
-
-	rst = devm_reset_control_get(dev, name);
-	if (IS_ERR(rst))
-		LOG_DEV_ERROR(dev,
-			      "failed to get rknpu reset control: %s, %ld\n",
-			      name, PTR_ERR(rst));
-
-	return rst;
-}
-
-int rknpu_reset_get(struct rknpu_device *rknpu_dev)
-{
-	int i = 0;
-	int num_srsts = 0;
-
-	num_srsts = of_count_phandle_with_args(rknpu_dev->dev->of_node,
-					       "resets", "#reset-cells");
-	if (num_srsts <= 0) {
-		LOG_DEV_ERROR(rknpu_dev->dev,
-			      "failed to get rknpu resets from dtb\n");
-		return num_srsts;
-	}
-
-	rknpu_dev->srsts = devm_kcalloc(rknpu_dev->dev, num_srsts,
-					sizeof(*rknpu_dev->srsts), GFP_KERNEL);
-	if (!rknpu_dev->srsts)
-		return -ENOMEM;
-
-	for (i = 0; i < num_srsts; ++i) {
-		rknpu_dev->srsts[i] = devm_reset_control_get_exclusive_by_index(
-			rknpu_dev->dev, i);
-		if (IS_ERR(rknpu_dev->srsts[i])) {
-			rknpu_dev->num_srsts = i;
-			return PTR_ERR(rknpu_dev->srsts[i]);
-		}
-	}
-
-	rknpu_dev->num_srsts = num_srsts;
-
-	return num_srsts;
-}
-
 static int rknpu_reset_assert(struct reset_control *rst)
 {
 	int ret = -EINVAL;

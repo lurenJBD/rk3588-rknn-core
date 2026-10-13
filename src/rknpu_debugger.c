@@ -16,7 +16,6 @@
 
 #include "rknpu_drv.h"
 #include "rknpu_core.h"
-#include "rknpu_mm.h"
 #include "rknpu_reset.h"
 #include "rknpu_debugger.h"
 #include "rknpu_devfreq.h"
@@ -489,17 +488,16 @@ static int rknpu_iommu_domains_show(struct seq_file *m, void *data)
 }
 
 static struct rknpu_debugger_list rknpu_debugger_root_list[] = {
-	{ "mem_stats", rknpu_mem_stats_show, NULL, NULL },
-	{ "iommu_domains", rknpu_iommu_domains_show, NULL, NULL },
-	{ "version", rknpu_version_show, NULL, NULL },
-	{ "load", rknpu_load_show, NULL, NULL },
-	{ "power", rknpu_power_show, rknpu_power_set, NULL },
-	{ "regs", rknpu_regs_show, NULL, NULL },
-	{ "freq", rknpu_freq_show, rknpu_freq_set, NULL },
-	{ "volt", rknpu_volt_show, NULL, NULL },
-	{ "delayms", rknpu_power_put_delay_show, rknpu_power_put_delay_set,
-	  NULL },
-	{ "reset", rknpu_reset_show, rknpu_reset_set, NULL },
+	{ "mem_stats", rknpu_mem_stats_show, NULL },
+	{ "iommu_domains", rknpu_iommu_domains_show, NULL },
+	{ "version", rknpu_version_show, NULL },
+	{ "load", rknpu_load_show, NULL },
+	{ "power", rknpu_power_show, rknpu_power_set },
+	{ "regs", rknpu_regs_show, NULL },
+	{ "freq", rknpu_freq_show, rknpu_freq_set },
+	{ "volt", rknpu_volt_show, NULL },
+	{ "delayms", rknpu_power_put_delay_show, rknpu_power_put_delay_set },
+	{ "reset", rknpu_reset_show, rknpu_reset_set },
 };
 
 static ssize_t rknpu_debugger_write(struct file *file, const char __user *ubuf,

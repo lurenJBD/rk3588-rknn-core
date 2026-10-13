@@ -146,9 +146,6 @@ u32 rknpu_core_read_block(struct rknpu_device *rknpu_dev, unsigned int core,
 		{ BLK_WIN, 0x4000 + 0x4 },	 /* DPU_S_POINTER    */
 		{ BLK_WIN, 0x4000 + 0x8 },	 /* DPU_OP_EN        */
 		{ BLK_WIN, 0x4000 + 0x10 },	 /* DPU_DATA_FORMAT  */
-		{ BLK_WIN, 0x400c },		 /* DPU_FEATURE_MODE */
-		{ BLK_WIN, 0x4020 },		 /* DPU_DST_BASE     */
-		{ BLK_WIN, 0x4084 },		 /* DPU_OUT_SCALE    */
 		{ BLK_WIN, 0x5000 + 0x0 },	 /* DPU_RDMA_S_STATUS  */
 		{ BLK_WIN, 0x5000 + 0x4 },	 /* DPU_RDMA_S_POINTER */
 		{ BLK_WIN, 0x5000 + 0x8 },	 /* DPU_RDMA_OP_EN     */
@@ -242,9 +239,7 @@ int rknpu_core_init(struct rknpu_device *rknpu_dev,
 	if (core->registered)
 		return -EBUSY;
 
-	core->pdev = pdev;
 	core->dev = dev;
-	core->index = index;
 	rknpu_core_drop_stale_pm_ref(dev);
 
 	/* Named register resources: pc, cna, core */

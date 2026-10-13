@@ -13,8 +13,6 @@
 
 #include "rknpu_drv.h"
 
-int rknpu_reset_get(struct rknpu_device *rknpu_dev);
-
 int rknpu_reset_begin(struct rknpu_device *rknpu_dev);
 
 int rknpu_reset_execute(struct rknpu_device *rknpu_dev);
