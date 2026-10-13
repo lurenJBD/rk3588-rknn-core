@@ -67,9 +67,7 @@ struct rknpu_gem_object {
 	unsigned long num_pages;
 	struct page **pages;
 	struct sg_table *sgt;
-	unsigned int dma_nents;
 	bool dma_allocated;
-	bool dma_mapped;
 	bool pages_backed;
 	/*
 	 * Mainline three-node topology: each RKNN core has a separate IOMMU
@@ -169,10 +167,6 @@ rknpu_gem_object_find_token(struct drm_device *drm, struct drm_file *file_priv,
 
 int rknpu_gem_core_mapping(struct rknpu_gem_object *rknpu_obj,
 			   unsigned int core, dma_addr_t *dma_addr);
-
-/* get buffer information to memory region allocated by gem. */
-int rknpu_gem_get_ioctl(struct drm_device *dev, void *data,
-			struct drm_file *file_priv);
 
 /* free gem object. */
 void rknpu_gem_free_object(struct drm_gem_object *obj);

@@ -304,8 +304,6 @@ static int rknpu_gem_get_pages(struct rknpu_gem_object *rknpu_obj)
 
 		if (core == canonical_core) {
 			rknpu_obj->sgt = sgt;
-			rknpu_obj->dma_nents = nents;
-			rknpu_obj->dma_mapped = true;
 			rknpu_obj->dma_addr = rknpu_obj->core_maps[core].dma_addr;
 		}
 
@@ -334,8 +332,6 @@ unmap_cores:
 			rknpu_gem_unmap_core_sg(rknpu_obj, core);
 		if (core == canonical_core) {
 			rknpu_obj->sgt = NULL;
-			rknpu_obj->dma_nents = 0;
-			rknpu_obj->dma_mapped = false;
 			rknpu_obj->dma_addr = 0;
 		}
 	}
@@ -369,8 +365,6 @@ static void rknpu_gem_put_pages(struct rknpu_gem_object *rknpu_obj)
 		rknpu_gem_unmap_core_sg(rknpu_obj, core);
 		if (core == canonical_core) {
 			rknpu_obj->sgt = NULL;
-			rknpu_obj->dma_nents = 0;
-			rknpu_obj->dma_mapped = false;
 			rknpu_obj->dma_addr = 0;
 		}
 	}
@@ -1369,7 +1363,6 @@ rknpu_gem_prime_import_sg_table(struct drm_device *dev,
 	}
 
 	rknpu_obj->dma_addr = sg_dma_address(sgt->sgl);
-	rknpu_obj->dma_nents = mapped_nents;
 
 	if ((rknpu_obj->size >> PAGE_SHIFT) > INT_MAX) {
 		ret = -E2BIG;
