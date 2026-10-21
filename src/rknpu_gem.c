@@ -1565,29 +1565,8 @@ int rknpu_gem_sync_ioctl(struct drm_device *dev, void *data,
 
 	if (!rknpu_gem_sync_is_valid(args->flags, args->offset, args->size,
 				     rknpu_obj->size)) {
-		bool flags_ok = args->flags && !(args->flags & ~RKNPU_MEM_SYNC_MASK);
-
-		/*
-		 * Tolerated callers:
-		 *  - zero-length sync is vacuous;
-		 *  - the closed-source runtime occasionally issues ranges
-		 *    larger than the object (live observation: size=0x40000
-		 *    on a 0x20000 cacheable object, flags=TO_DEVICE,
-		 *    offset=0). Clamp to the object extent: maintaining the
-		 *    covered portion beats failing the whole call, which
-		 *    propagates into runtime error paths (embedding API
-		 *    500s). Flags must still be sane and the offset in range.
-		 */
-		if (flags_ok && args->offset <= rknpu_obj->size) {
-			if (args->offset >= rknpu_obj->size || !args->size) {
-				args->size = 0;
-			} else {
-				args->size = rknpu_obj->size - args->offset;
-			}
-		} else {
-			ret = -EINVAL;
-			goto out_put;
-		}
+		ret = -EINVAL;
+		goto out_put;
 	}
 
 	if (!(rknpu_obj->flags & RKNPU_MEM_CACHEABLE) &&
